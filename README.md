@@ -36,6 +36,12 @@ It is safe to re-run: it offers your saved values as defaults and replaces only 
 1. Deploy [`apps-script/Code.gs`](apps-script/README.md) and set its `API_SECRET` script property. That is the value you give `setup.sh`.
 2. Open `ios/OptiTow.xcodeproj` in Xcode and choose your signing team.
 
+## Docs
+
+- [`CLAUDE.md`](CLAUDE.md): the master architecture and business rules.
+- [`APP_SPEC.md`](APP_SPEC.md): iOS app UI/UX rules and the exact chip values.
+- [`SCHEMA.md`](SCHEMA.md): the 29-column sheet layout and the iOS JSON payload.
+
 ## Tests
 
 ```bash

@@ -39,10 +39,8 @@ test('iOS SyncPayload keys == Apps Script APP_FIELDS keys + token', () => {
   assert.deepEqual([...payload].sort(), ['token', ...Object.keys(APP_FIELDS)].sort());
 });
 
-test('SCHEMA.md example payload keys == iOS SyncPayload keys', (t) => {
-  const schemaPath = path.join(root, '..', 'SCHEMA.md');
-  if (!fs.existsSync(schemaPath)) return t.skip('SCHEMA.md lives outside the repo');
-  const json = fs.readFileSync(schemaPath, 'utf8').match(/```json\s*([\s\S]*?\})/)[1];
+test('SCHEMA.md example payload keys == iOS SyncPayload keys', () => {
+  const json = read('SCHEMA.md').match(/```json\s*([\s\S]*?\})/)[1];
   const schemaKeys = Object.keys(JSON.parse(json));
   const payload = swiftStructProps(read('ios/OptiTow/Models/CallRecord.swift'), 'SyncPayload');
   assert.deepEqual([...payload].sort(), [...schemaKeys].sort());
