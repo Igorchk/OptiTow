@@ -92,6 +92,7 @@ const ENUMS = Object.freeze({
   Vehicle_Condition: ['Rolling / Neutral', 'Locked in Park', 'No Keys', 'Flat Tire', 'Ditch / Mud / Winch', 'Collision', 'Wheel Damaged', 'Mechanical / Electrical Issue'],
   Scene_Location: ['Residential Driveway', 'Public Surface Street', 'Highway / Freeway Shoulder', 'Underground Parking Structure', 'Commercial Lot'],
   Outcome: [OUTCOME_WON, '0 - Lost / Declined'],
+  Caller_Tone: ['Calm', 'Stressed', 'Frustrated', 'Angry', 'Confused', 'Rushed', 'Price Shopping', 'Cooperative'],
   Decline_Reason: ['Price Too High', 'ETA Too Long', 'Already Found Help', 'Changed Mind', DECLINE_NA_WON],
 });
 
@@ -485,8 +486,10 @@ function listPendingAudio_(body) {
         customer_phone: String(r[c.Customer_Phone]),
         call_duration_sec: r[c.Call_Duration_Sec] === '' ? null : r[c.Call_Duration_Sec],
         call_recording_url: String(r[c.Call_Recording_URL]),
-        // Blank means CallRail gave no attribution and the AI may fill it.
+        // Current values of the AI-fillable cells. Blank means the AI may fill it.
         lead_source: String(r[c.Lead_Source]),
+        caller_tone: String(r[c.Caller_Tone]),
+        mentioned_damage: String(r[c.Mentioned_Damage]),
       });
     }
   }
@@ -499,15 +502,12 @@ function applyAiResult_(body) {
   if (callId === '' && recordingUrl === '') {
     throw new ApiError('BAD_REQUEST', 'call_id or call_recording_url is required.');
   }
-  if (body.caller_tone === undefined && body.mentioned_damage === undefined && body.lead_source === undefined) {
-    throw new ApiError('BAD_REQUEST', 'caller_tone, mentioned_damage or lead_source is required.');
+  const hasContent = body.caller_tone !== undefined || body.mentioned_damage !== undefined ||
+    body.lead_source !== undefined;
+  // `mark_processed` lets the worker retire a row whose AI cells were all filled by hand.
+  if (!hasContent && body.mark_processed !== true) {
+    throw new ApiError('BAD_REQUEST', 'caller_tone, mentioned_damage, lead_source or mark_processed is required.');
   }
-
-  // Whitelist: nothing else in the body can reach the sheet.
-  const updates = { AI_Processed_At: new Date() };
-  if (body.caller_tone !== undefined) updates.Caller_Tone = body.caller_tone;
-  if (body.mentioned_damage !== undefined) updates.Mentioned_Damage = body.mentioned_damage;
-  const warnings = [];
 
   return withLock_(function () {
     const log = getCallLog_();
@@ -517,16 +517,41 @@ function applyAiResult_(body) {
     if (!rowNum && recordingUrl !== '') rowNum = findByColumnValue_(log, 'Call_Recording_URL', recordingUrl);
     if (!rowNum) throw new ApiError('NOT_FOUND', 'No row matches that call_id / call_recording_url.');
 
-    // Lead_Source is a fallback only: CallRail attribution always wins, and the value must be
-    // one of the picklist entries.
+    // Whitelist: nothing else in the body can reach the sheet. Every AI-fillable cell is
+    // fill-only-if-blank, so the AI can never overwrite CallRail attribution or anything a
+    // person typed. (To re-run a row, clear its AI cells first.)
+    const current = log.sheet.getRange(rowNum, 1, 1, log.width).getValues()[0];
+    const updates = { AI_Processed_At: new Date() };
+    const warnings = [];
+    const offer = function (header, value) {
+      if (value === '') return;
+      if (!isBlank_(current[log.col[header]])) {
+        warnings.push('Ignored ' + header + ': already set.');
+      } else {
+        updates[header] = value;
+      }
+    };
+
+    if (body.caller_tone !== undefined) {
+      const tone = String(cleanValue_(body.caller_tone));
+      if (ENUMS.Caller_Tone.indexOf(tone) === -1) {
+        warnings.push('Ignored Caller_Tone "' + tone + '": not in the Caller_Tone picklist.');
+      } else {
+        offer('Caller_Tone', tone);
+      }
+    }
+    if (body.mentioned_damage !== undefined) {
+      const damage = Array.isArray(body.mentioned_damage)
+        ? body.mentioned_damage.map(function (d) { return String(cleanValue_(d)); }).filter(Boolean).join(', ')
+        : String(cleanValue_(body.mentioned_damage));
+      offer('Mentioned_Damage', damage.slice(0, 500));
+    }
     if (body.lead_source !== undefined) {
       const proposed = String(cleanValue_(body.lead_source));
       if (ENUMS.Lead_Source.indexOf(proposed) === -1) {
-        warnings.push('Ignored lead_source "' + proposed + '": not in the Lead_Source picklist.');
-      } else if (!isBlank_(log.sheet.getRange(rowNum, log.col.Lead_Source + 1).getValue())) {
-        warnings.push('Ignored lead_source: Lead_Source is already set.');
+        warnings.push('Ignored Lead_Source "' + proposed + '": not in the Lead_Source picklist.');
       } else {
-        updates.Lead_Source = proposed;
+        offer('Lead_Source', proposed);
       }
     }
 

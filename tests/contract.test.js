@@ -88,3 +88,27 @@ test('column layout: 29 columns, Urgency_Level retired, dispatcher block is colu
   assert.deepEqual([...HEADERS].slice(21, 26), ['Lead_Source', 'Search_Keyword', 'Campaign_Name', 'Call_Duration_Sec', 'Call_Recording_URL']);
   assert.deepEqual([...HEADERS].slice(26), ['Caller_Tone', 'Mentioned_Damage', 'AI_Processed_At']);
 });
+
+test('worker/schema.py picklists == Apps Script ENUMS (Caller_Tone, Lead_Source)', () => {
+  const { ENUMS } = loadGs();
+  const py = read('worker/schema.py');
+  const literal = (name) => {
+    const m = py.match(new RegExp(`${name} = Literal\\[([^\\]]*)\\]`));
+    assert.ok(m, `${name} Literal not found in schema.py`);
+    return [...m[1].matchAll(/"([^"]*)"/g)].map((x) => x[1]);
+  };
+  assert.deepEqual(literal('CallerTone'), [...ENUMS.Caller_Tone]);
+  assert.deepEqual(literal('LeadSource'), [...ENUMS.Lead_Source]);
+});
+
+test('worker only writes keys the Apps Script AI endpoint accepts', () => {
+  const gs = read('apps-script/Code.gs');
+  const body = gs.split('function applyAiResult_')[1].split('\n}\n')[0];
+  const accepted = [...body.matchAll(/body\.([a-z_]+)/g)].map((m) => m[1]);
+  // The fields declared on the worker's Enrichment model.
+  const workerFields = [...read('worker/schema.py').matchAll(/^    (\w+): .*Field\(/gm)].map((m) => m[1]);
+  assert.deepEqual([...workerFields].sort(), ['caller_tone', 'lead_source', 'mentioned_damage']);
+  for (const key of [...workerFields, 'mark_processed', 'call_id', 'call_recording_url']) {
+    assert.ok(accepted.includes(key), `${key} is read by applyAiResult_`);
+  }
+});

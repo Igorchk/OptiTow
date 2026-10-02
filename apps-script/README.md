@@ -103,15 +103,17 @@ Configure this as the **post-call webhook**. It accepts both the v3 JSON body an
 List rows that have a recording but no `AI_Processed_At` yet:
 ```json
 { "token": "…", "action": "pending", "limit": 25 }
-→ { "ok": true, "count": 1, "items": [{ "call_id", "date_time", "customer_phone", "call_duration_sec", "call_recording_url", "lead_source" }] }
+→ { "ok": true, "count": 1, "items": [{ "call_id", "date_time", "customer_phone", "call_duration_sec", "call_recording_url", "lead_source", "caller_tone", "mentioned_damage" }] }
 ```
 Write results:
 ```json
 { "token": "…", "action": "update", "call_id": "…", "call_recording_url": "…",
   "caller_tone": "Stressed", "mentioned_damage": ["front bumper"], "lead_source": "Repeat / Direct" }
 ```
-- **Columns written:** only `Caller_Tone`, `Mentioned_Damage`, `AI_Processed_At` (set to server time) and, conditionally, `Lead_Source`. Any other keys are ignored. Arrays are stored comma-joined. At least one of `caller_tone`, `mentioned_damage` or `lead_source` is required.
-- **`lead_source` is a fallback only.** It is written only if the cell is still blank (an empty `lead_source` in a `pending` item means CallRail gave no attribution) and only if the value is in the `Lead_Source` picklist. Otherwise the value is ignored and the response carries a message in `warnings`. The request still succeeds.
+- **Columns written:** only `Caller_Tone`, `Mentioned_Damage`, `Lead_Source` and `AI_Processed_At` (set to server time). Any other keys are ignored. Arrays for `mentioned_damage` are stored comma-joined.
+- **At least one of `caller_tone`, `mentioned_damage`, `lead_source` or `"mark_processed": true` is required.** `mark_processed` only sets `AI_Processed_At`. It retires a row whose AI cells were all filled by hand.
+- **Fill-only-if-blank.** Each of the three cells is written only if it is currently empty (an existing value is ignored and reported in `warnings`). The `pending` items carry the current `caller_tone`, `mentioned_damage` and `lead_source`, so a worker only asks the model for the blanks. To re-run a row, clear those cells first.
+- **Picklists.** `caller_tone` must be one of `Calm`, `Stressed`, `Frustrated`, `Angry`, `Confused`, `Rushed`, `Price Shopping`, `Cooperative`. `lead_source` must be one of the six `Lead_Source` values. Anything else is ignored with a warning, and the request still succeeds.
 - **Send `call_recording_url` too.** If the iOS app claims a CallRail row while the worker is processing it, that row's `call_id` changes, and the recording URL is how the update still finds it.
 
 CallRail's v3 `recording` URL is an API endpoint that needs a CallRail API key. Phase 3 will fetch audio with that key.

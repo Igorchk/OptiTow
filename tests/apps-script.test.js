@@ -411,6 +411,55 @@ test('ai: update falls back to recording URL when call_id was re-keyed', () => {
   assert.equal(post(env, { token: API_SECRET, action: 'update', call_id: 'missing', caller_tone: 'x' }, { source: 'ai' }).code, 'NOT_FOUND');
 });
 
+test('ai: never overwrites Caller_Tone or Mentioned_Damage that are already set', () => {
+  const env = makeContext();
+  const cr = post(env, callRail(), CR_QUERY);
+  const first = post(env, { token: API_SECRET, action: 'update', call_id: cr.call_id,
+    caller_tone: 'Calm', mentioned_damage: ['dented door'] }, { source: 'ai' });
+  assert.deepEqual(first.warnings, []);
+
+  const second = post(env, { token: API_SECRET, action: 'update', call_id: cr.call_id,
+    caller_tone: 'Angry', mentioned_damage: ['totalled'] }, { source: 'ai' });
+  assert.equal(second.ok, true);
+  assert.equal(second.warnings.length, 2);
+  const r = rowObj(env, cr.row);
+  assert.equal(r.Caller_Tone, 'Calm');
+  assert.equal(r.Mentioned_Damage, 'dented door');
+
+  const pending = post(env, { token: API_SECRET, action: 'pending' }, { source: 'ai' });
+  assert.equal(pending.count, 0, 'processed rows leave the queue');
+});
+
+test('ai: pending reports current AI cells so the worker can ask only for blanks', () => {
+  const env = makeContext();
+  const cr = post(env, callRail({ source: 'Google Ads' }), CR_QUERY);
+  env.sheet.data[cr.row - 1][env.sheet.data[0].indexOf('Mentioned_Damage')] = 'typed by hand';
+  const item = post(env, { token: API_SECRET, action: 'pending' }, { source: 'ai' }).items[0];
+  assert.equal(item.lead_source, 'Google Ads');
+  assert.equal(item.mentioned_damage, 'typed by hand');
+  assert.equal(item.caller_tone, '');
+});
+
+test('ai: Caller_Tone must be in the picklist; arrays and "None" are stored as text', () => {
+  const env = makeContext();
+  const cr = post(env, callRail(), CR_QUERY);
+  const res = post(env, { token: API_SECRET, action: 'update', call_id: cr.call_id,
+    caller_tone: 'Hysterical', mentioned_damage: 'None' }, { source: 'ai' });
+  assert.match(res.warnings[0], /Caller_Tone/);
+  const r = rowObj(env, cr.row);
+  assert.equal(r.Caller_Tone, '');
+  assert.equal(r.Mentioned_Damage, 'None');
+});
+
+test('ai: mark_processed retires a row without writing values; empty updates are rejected', () => {
+  const env = makeContext();
+  const cr = post(env, callRail(), CR_QUERY);
+  assert.equal(post(env, { token: API_SECRET, action: 'update', call_id: cr.call_id }, { source: 'ai' }).code, 'BAD_REQUEST');
+  const res = post(env, { token: API_SECRET, action: 'update', call_id: cr.call_id, mark_processed: true }, { source: 'ai' });
+  assert.equal(res.ok, true);
+  assert.equal(post(env, { token: API_SECRET, action: 'pending' }, { source: 'ai' }).count, 0);
+});
+
 test('unknown source and malformed JSON are handled', () => {
   const env = makeContext();
   assert.equal(post(env, appPayload(), { source: 'bogus' }).code, 'BAD_REQUEST');
