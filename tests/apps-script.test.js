@@ -50,7 +50,8 @@ const CR_QUERY = { source: 'callrail', token: API_SECRET };
 
 test('setup writes headers and reference data incl. Website Form', () => {
   const env = makeContext();
-  assert.equal(env.sheet.data[0].length, 30);
+  assert.equal(env.sheet.data[0].length, 29);
+  assert.ok(!env.sheet.data[0].includes('Urgency_Level'));
   const leadCol = env.ref.data[0].indexOf('Lead_Source');
   assert.ok(env.ref.data.some((r) => r[leadCol] === 'Website Form'));
 });
@@ -124,14 +125,14 @@ test('app: new chip values are accepted without warnings', () => {
   assert.match(post(env, appPayload({ call_id: 'old', vehicle_condition: 'Collision / Wheel Damaged' })).warnings[0], /Vehicle_Condition/);
 });
 
-test('app: lead_source and urgency_level are no longer app-owned (stale builds cannot write them)', () => {
+test('app: lead_source and urgency_level are not app fields (stale builds cannot write them)', () => {
   const env = makeContext();
   const res = post(env, appPayload({ lead_source: 'Google Ads', urgency_level: 'Standard' }));
   assert.equal(res.ok, true);
   assert.deepEqual(res.warnings, []);
   const r = rowObj(env, res.row);
   assert.equal(r.Lead_Source, '');
-  assert.equal(r.Urgency_Level, '');
+  assert.ok(!('Urgency_Level' in r), 'column retired');
   assert.ok(!r.Notes_Comments.includes('Google Ads'), 'ignored, not appended to notes');
 });
 
@@ -148,9 +149,89 @@ test('callrail after app: merges marketing data without touching dispatcher fiel
   assert.equal(after.Campaign_Name, 'Sacramento_Towing_HighIntent');
   assert.equal(after.Call_Duration_Sec, 145);
   assert.equal(after.Call_Recording_URL, callRail().recording);
-  for (const h of ['Call_ID', 'Customer_Phone', 'Lead_Source', 'Quoted_Price', 'Outcome', 'Notes_Comments']) {
+  assert.equal(after.Lead_Source, 'Google Ads', 'CallRail attribution fills the blank Lead_Source');
+  for (const h of ['Call_ID', 'Customer_Phone', 'Quoted_Price', 'Outcome', 'Notes_Comments']) {
     assert.deepEqual(after[h], before[h], `${h} untouched`);
   }
+});
+
+test('callrail maps tracking source to Lead_Source', () => {
+  const cases = [
+    [{ source: 'Google Ads' }, 'Google Ads'],
+    [{ source: 'Google AdWords' }, 'Google Ads'],
+    [{ source: 'Google Paid', medium: 'cpc' }, 'Google Ads'],
+    [{ source: 'Bing', medium: 'PPC' }, 'Google Ads'],
+    [{ source: 'Google Organic', medium: 'organic' }, 'Google Maps / Organic'],
+    [{ source: 'Google My Business' }, 'Google Maps / Organic'],
+    [{ source: 'Google Maps' }, 'Google Maps / Organic'],
+    [{ source: 'Direct' }, 'Repeat / Direct'],
+    [{ source: 'Organic Search' }, 'Repeat / Direct'],
+    [{ source: 'Referral' }, 'Repeat / Direct'],
+    [{ source: 'Motor Club Referral' }, 'Motor Club Referral'],
+    [{ source: 'AAA Auto Club' }, 'Motor Club Referral'],
+    [{ source: 'Facebook', medium: 'social' }, 'Other'],
+    [{ source: 'Yelp' }, 'Other'],
+  ];
+  cases.forEach(([attrib, expected], i) => {
+    const env = makeContext();
+    const res = post(env, callRail({ customer_phone_number: `+1279555${String(i).padStart(4, '0')}`, ...attrib }), CR_QUERY);
+    assert.equal(rowObj(env, res.row).Lead_Source, expected, JSON.stringify(attrib));
+  });
+});
+
+test('callrail with no attribution leaves Lead_Source blank for the AI fallback', () => {
+  const env = makeContext();
+  const call = callRail();
+  delete call.source;
+  const res = post(env, call, CR_QUERY);
+  assert.equal(rowObj(env, res.row).Lead_Source, '');
+});
+
+test('callrail fills a blank Lead_Source on merge but never overwrites an existing one', () => {
+  const env = makeContext();
+  post(env, appPayload());
+  assert.equal(rowObj(env, 2).Lead_Source, '', 'app never sets it');
+  post(env, callRail({ source: 'Google Ads' }), CR_QUERY);
+  assert.equal(rowObj(env, 2).Lead_Source, 'Google Ads');
+  // A website lead keeps "Website Form" when the same person then phones in.
+  const web = post(env, { token: WEBSITE_SECRET, phone: '916-555-0777', date_time: '2026-10-02T21:20:00Z' }, { source: 'website' });
+  const merged = post(env, callRail({ customer_phone_number: '+19165550777', source: 'Direct',
+    recording: 'https://api.callrail.com/v3/a/ACC1/calls/CAL777/recording.json' }), CR_QUERY);
+  assert.equal(merged.row, web.row);
+  assert.equal(rowObj(env, web.row).Lead_Source, 'Website Form');
+});
+
+test('ai: fills Lead_Source only when blank, and only with a picklist value', () => {
+  const env = makeContext();
+  // CallRail had no attribution -> blank, AI may fill it.
+  const call = callRail();
+  delete call.source;
+  const cr = post(env, call, CR_QUERY);
+  const pending = post(env, { token: API_SECRET, action: 'pending' }, { source: 'ai' });
+  assert.equal(pending.items[0].lead_source, '');
+
+  const bad = post(env, { token: API_SECRET, action: 'update', call_id: cr.call_id, lead_source: 'Billboard' }, { source: 'ai' });
+  assert.equal(bad.ok, true);
+  assert.match(bad.warnings[0], /picklist/);
+  assert.equal(rowObj(env, cr.row).Lead_Source, '');
+
+  const good = post(env, { token: API_SECRET, action: 'update', call_id: cr.call_id, lead_source: 'Repeat / Direct', caller_tone: 'Calm' }, { source: 'ai' });
+  assert.deepEqual(good.warnings, []);
+  assert.equal(rowObj(env, cr.row).Lead_Source, 'Repeat / Direct');
+  assert.equal(rowObj(env, cr.row).Caller_Tone, 'Calm');
+
+  // Already set (by CallRail or an earlier AI pass): the AI value is ignored.
+  const again = post(env, { token: API_SECRET, action: 'update', call_id: cr.call_id, lead_source: 'Google Ads' }, { source: 'ai' });
+  assert.match(again.warnings[0], /already set/);
+  assert.equal(rowObj(env, cr.row).Lead_Source, 'Repeat / Direct');
+});
+
+test('ai: CallRail attribution is never overwritten by the AI', () => {
+  const env = makeContext();
+  const cr = post(env, callRail({ source: 'Google Ads' }), CR_QUERY);
+  const res = post(env, { token: API_SECRET, action: 'update', call_id: cr.call_id, lead_source: 'Other' }, { source: 'ai' });
+  assert.match(res.warnings[0], /already set/);
+  assert.equal(rowObj(env, cr.row).Lead_Source, 'Google Ads');
 });
 
 test('callrail retry (same recording) is idempotent', () => {
@@ -172,7 +253,8 @@ test('callrail with no matching phone creates a row with blank dispatcher fields
   assert.equal(r.Call_ID, res.call_id);
   assert.equal(r.Date_Time.toISOString(), '2026-10-02T21:40:00.000Z');
   assert.equal(r.Call_Recording_URL, callRail().recording);
-  for (const h of ['Caller_Type', 'Lead_Source', 'Quoted_Price', 'Outcome', 'Decline_Reason']) {
+  assert.equal(r.Lead_Source, 'Google Ads');
+  for (const h of ['Caller_Type', 'Quoted_Price', 'Outcome', 'Decline_Reason']) {
     assert.equal(r[h], '', `${h} blank`);
   }
 });
@@ -233,8 +315,12 @@ test('app does not claim a row that already has an Outcome', () => {
 
 test('legacy sheet rows (text dates, 7-digit phones, numeric ids) still match', () => {
   const env = makeContext((sheet) => {
-    const row = new Array(30).fill('');
-    row[0] = 1001; row[1] = '2026-10-02 14:30:00'; row[2] = '555-0101'; row[20] = '1 - Won / Booked';
+    const header = sheet.data[0];
+    const row = new Array(header.length).fill('');
+    row[header.indexOf('Call_ID')] = 1001;
+    row[header.indexOf('Date_Time')] = '2026-10-02 14:30:00';
+    row[header.indexOf('Customer_Phone')] = '555-0101';
+    row[header.indexOf('Outcome')] = '1 - Won / Booked';
     sheet.data.push(row);
   });
   const res = post(env, callRail({ customer_phone_number: '555-0101', start_time: '2026-10-02 14:45:00' }), CR_QUERY);
@@ -306,7 +392,8 @@ test('ai: pending lists unprocessed recordings; update writes only AI columns', 
   assert.equal(after.Caller_Tone, 'Stressed');
   assert.equal(after.Mentioned_Damage, 'front bumper, flat tire');
   assert.equal(Object.prototype.toString.call(after.AI_Processed_At), '[object Date]');
-  for (const h of env.sheet.data[0].slice(0, 27)) assert.deepEqual(after[h], before[h], `${h} untouched`);
+  const aiCols = ['Caller_Tone', 'Mentioned_Damage', 'AI_Processed_At'];
+  for (const h of env.sheet.data[0].filter((c) => !aiCols.includes(c))) assert.deepEqual(after[h], before[h], `${h} untouched`);
 
   assert.equal(post(env, { token: API_SECRET, action: 'pending' }, { source: 'ai' }).count, 0);
 });

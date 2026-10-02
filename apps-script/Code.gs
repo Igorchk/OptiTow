@@ -13,9 +13,12 @@
  * body: { ok: true, ... } or { ok: false, code, error }. Clients must check `ok`.
  *
  * Column ownership (a source only ever writes its own columns):
- *   App / website  -> Call_ID … Notes_Comments, plus computed Loaded_Miles / Deadhead_Est_Miles
- *   CallRail       -> Search_Keyword, Campaign_Name, Call_Duration_Sec, Call_Recording_URL
- *   AI worker      -> Caller_Tone, Mentioned_Damage, AI_Processed_At
+ *   App / website  -> columns 1-21 (Call_ID … Notes_Comments, incl. computed Loaded_Miles /
+ *                     Deadhead_Est_Miles); website leads also set Lead_Source = "Website Form"
+ *   CallRail       -> Lead_Source (only if blank), Search_Keyword, Campaign_Name,
+ *                     Call_Duration_Sec, Call_Recording_URL
+ *   AI worker      -> Caller_Tone, Mentioned_Damage, AI_Processed_At, and Lead_Source only if
+ *                     still blank after CallRail
  */
 
 const CONFIG = Object.freeze({
@@ -31,18 +34,22 @@ const CONFIG = Object.freeze({
   ROW_GROWTH: 500,
 });
 
+// 29 columns. Columns 1-21 are the dispatcher block (app/website writes, plus the computed miles);
+// 22-29 are automated ingestion (CallRail, then the AI worker), so a dispatcher write can never
+// land on an automated column. Lookups are by header name, never by position.
 const HEADERS = Object.freeze([
-  'Call_ID', 'Date_Time', 'Customer_Phone', 'Caller_Type', 'Payer_Name', 'Lead_Source',
+  'Call_ID', 'Date_Time', 'Customer_Phone', 'Caller_Type', 'Payer_Name',
   'Service_Requested', 'Vehicle_Year', 'Vehicle_Make', 'Vehicle_Model', 'Drivetrain',
   'Vehicle_Condition', 'Scene_Location', 'Start_Location', 'Pickup_Address', 'Dropoff_Address',
-  'Loaded_Miles', 'Deadhead_Est_Miles', 'Urgency_Level', 'Quoted_Price', 'Outcome',
-  'Decline_Reason', 'Notes_Comments', 'Search_Keyword', 'Campaign_Name', 'Call_Duration_Sec',
-  'Call_Recording_URL', 'Caller_Tone', 'Mentioned_Damage', 'AI_Processed_At',
+  'Loaded_Miles', 'Deadhead_Est_Miles', 'Quoted_Price', 'Outcome', 'Decline_Reason',
+  'Notes_Comments',
+  'Lead_Source', 'Search_Keyword', 'Campaign_Name', 'Call_Duration_Sec', 'Call_Recording_URL',
+  'Caller_Tone', 'Mentioned_Damage', 'AI_Processed_At',
 ]);
 
 // JSON key (SCHEMA.md) -> sheet header. These are the dispatcher-owned columns.
-// Lead_Source (CallRail attribution) and Urgency_Level (Phase 3 AI) stay in the sheet but are
-// no longer sent by the app, so they are deliberately absent here.
+// Lead_Source is automated (CallRail, then AI fallback) and is deliberately absent here.
+// Urgency_Level was retired from the sheet entirely.
 const APP_FIELDS = Object.freeze({
   call_id: 'Call_ID',
   date_time: 'Date_Time',
@@ -74,8 +81,8 @@ const DECLINE_NA_WON = 'N/A - Won';
 const LEAD_SOURCE_WEBSITE = 'Website Form';
 
 // Allowed values (APP_SPEC.md §5–6). Also written to the Reference Data tab by setup().
-// Lead_Source and Urgency_Level are not app chips any more; they remain here as the sheet's
-// vocabulary for the columns CallRail and the AI worker will fill.
+// Lead_Source is not an app chip; it stays here as the picklist CallRail attribution and the AI
+// worker must map into.
 const ENUMS = Object.freeze({
   Caller_Type: ['Private Cash', 'Insurance / Motor Club', 'Commercial Fleet', 'Body Shop'],
   Payer_Name: ['Cash / Customer', 'Triple A (AAA)', 'Agero', 'Geico', 'Allstate', 'State Farm', 'Swoop', 'Urgently', 'Other'],
@@ -84,7 +91,6 @@ const ENUMS = Object.freeze({
   Drivetrain: ['FWD', 'RWD', 'AWD / 4WD', 'Electric Vehicle (EV)', 'Hybrid', 'Unknown'],
   Vehicle_Condition: ['Rolling / Neutral', 'Locked in Park', 'No Keys', 'Flat Tire', 'Ditch / Mud / Winch', 'Collision', 'Wheel Damaged', 'Mechanical / Electrical Issue'],
   Scene_Location: ['Residential Driveway', 'Public Surface Street', 'Highway / Freeway Shoulder', 'Underground Parking Structure', 'Commercial Lot'],
-  Urgency_Level: ['Standard', 'High / Stranded Hazard', 'Scheduled Later'],
   Outcome: [OUTCOME_WON, '0 - Lost / Declined'],
   Decline_Reason: ['Price Too High', 'ETA Too Long', 'Already Found Help', 'Changed Mind', DECLINE_NA_WON],
 });
@@ -374,7 +380,12 @@ function handleCallRail_(body) {
 
     let callId;
     if (rowNum) {
-      writeCells_(log, rowNum, call.fields);
+      // Never overwrite an existing Lead_Source (e.g. a website lead that then phoned in).
+      const updates = Object.assign({}, call.fields);
+      if (call.leadSource && isBlank_(log.sheet.getRange(rowNum, log.col.Lead_Source + 1).getValue())) {
+        updates.Lead_Source = call.leadSource;
+      }
+      writeCells_(log, rowNum, updates);
       callId = String(log.sheet.getRange(rowNum, log.col.Call_ID + 1).getValue());
     } else {
       // Dispatcher columns stay blank; only identity + CallRail data are written.
@@ -383,7 +394,7 @@ function handleCallRail_(body) {
         Call_ID: callId,
         Date_Time: call.time,
         Customer_Phone: call.phone,
-      }, call.fields));
+      }, call.leadSource ? { Lead_Source: call.leadSource } : {}, call.fields));
       action = 'created';
     }
 
@@ -423,7 +434,26 @@ function normalizeCallRail_(body) {
     phoneKey: phoneKey_(rawPhone),
     time: time,
     fields: fields,
+    // Kept apart from `fields`: it is attribution, not call data, and is only filled if blank.
+    leadSource: mapLeadSource_(pick('source', 'source_name'), pick('medium', 'utm_medium')),
   };
+}
+
+/**
+ * CallRail tracking source/medium -> Lead_Source picklist. First match wins, so the order matters
+ * ("Motor Club Referral" must be tested before the generic "referral"). Returns '' when CallRail
+ * sent no attribution at all, leaving the cell open for the AI fallback.
+ */
+function mapLeadSource_(source, medium) {
+  const text = (String(source || '') + ' ' + String(medium || ''))
+    .toLowerCase().replace(/[_\-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  if (/\b(google ?ads?|adwords|ppc|cpc|google paid)\b/.test(text)) return 'Google Ads';
+  if (/\b(google (organic|my business|business profile|maps)|gmb|maps)\b/.test(text)) return 'Google Maps / Organic';
+  if (/\b(motor club|auto club)\b/.test(text)) return 'Motor Club Referral';
+  if (/\b(direct|organic search|referral)\b/.test(text)) return 'Repeat / Direct';
+  if (/\bwebsite form\b/.test(text)) return LEAD_SOURCE_WEBSITE;
+  return 'Other';
 }
 
 // ---------------------------------------------------------------------------
@@ -455,6 +485,8 @@ function listPendingAudio_(body) {
         customer_phone: String(r[c.Customer_Phone]),
         call_duration_sec: r[c.Call_Duration_Sec] === '' ? null : r[c.Call_Duration_Sec],
         call_recording_url: String(r[c.Call_Recording_URL]),
+        // Blank means CallRail gave no attribution and the AI may fill it.
+        lead_source: String(r[c.Lead_Source]),
       });
     }
   }
@@ -467,14 +499,15 @@ function applyAiResult_(body) {
   if (callId === '' && recordingUrl === '') {
     throw new ApiError('BAD_REQUEST', 'call_id or call_recording_url is required.');
   }
-  if (body.caller_tone === undefined && body.mentioned_damage === undefined) {
-    throw new ApiError('BAD_REQUEST', 'caller_tone or mentioned_damage is required.');
+  if (body.caller_tone === undefined && body.mentioned_damage === undefined && body.lead_source === undefined) {
+    throw new ApiError('BAD_REQUEST', 'caller_tone, mentioned_damage or lead_source is required.');
   }
 
   // Whitelist: nothing else in the body can reach the sheet.
   const updates = { AI_Processed_At: new Date() };
   if (body.caller_tone !== undefined) updates.Caller_Tone = body.caller_tone;
   if (body.mentioned_damage !== undefined) updates.Mentioned_Damage = body.mentioned_damage;
+  const warnings = [];
 
   return withLock_(function () {
     const log = getCallLog_();
@@ -484,11 +517,25 @@ function applyAiResult_(body) {
     if (!rowNum && recordingUrl !== '') rowNum = findByColumnValue_(log, 'Call_Recording_URL', recordingUrl);
     if (!rowNum) throw new ApiError('NOT_FOUND', 'No row matches that call_id / call_recording_url.');
 
+    // Lead_Source is a fallback only: CallRail attribution always wins, and the value must be
+    // one of the picklist entries.
+    if (body.lead_source !== undefined) {
+      const proposed = String(cleanValue_(body.lead_source));
+      if (ENUMS.Lead_Source.indexOf(proposed) === -1) {
+        warnings.push('Ignored lead_source "' + proposed + '": not in the Lead_Source picklist.');
+      } else if (!isBlank_(log.sheet.getRange(rowNum, log.col.Lead_Source + 1).getValue())) {
+        warnings.push('Ignored lead_source: Lead_Source is already set.');
+      } else {
+        updates.Lead_Source = proposed;
+      }
+    }
+
     writeCells_(log, rowNum, updates);
     return {
       action: 'updated',
       call_id: String(log.sheet.getRange(rowNum, log.col.Call_ID + 1).getValue()),
       row: rowNum,
+      warnings: warnings,
     };
   });
 }

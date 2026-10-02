@@ -75,3 +75,16 @@ test('vehicles.json has 15 makes, Tesla models per APP_SPEC', () => {
   assert.deepEqual(tesla.models, ['Model 3', 'Model Y', 'Model S', 'Model X', 'Cybertruck']);
   for (const v of vehicles) assert.ok(v.models.length > 0 && !v.models.includes('Other'), v.make);
 });
+
+test('column layout: 29 columns, Urgency_Level retired, dispatcher block is columns 1-21', () => {
+  const { APP_FIELDS, HEADERS } = loadGs();
+  assert.equal(HEADERS.length, 29);
+  assert.equal(new Set(HEADERS).size, 29);
+  assert.ok(!HEADERS.includes('Urgency_Level'));
+  // Everything the app/website may write (plus the two computed mileage columns) is exactly the
+  // first 21 columns; everything after is automated, starting with Lead_Source.
+  const dispatcher = [...Object.values(APP_FIELDS), 'Loaded_Miles', 'Deadhead_Est_Miles'];
+  assert.deepEqual([...dispatcher].sort(), [...HEADERS].slice(0, 21).sort());
+  assert.deepEqual([...HEADERS].slice(21, 26), ['Lead_Source', 'Search_Keyword', 'Campaign_Name', 'Call_Duration_Sec', 'Call_Recording_URL']);
+  assert.deepEqual([...HEADERS].slice(26), ['Caller_Tone', 'Mentioned_Damage', 'AI_Processed_At']);
+});
