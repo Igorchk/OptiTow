@@ -12,7 +12,6 @@ final class CallRecord {
     var customer_phone: String
     var caller_type: String
     var payer_name: String
-    var lead_source: String
     var service_requested: String
     var vehicle_year: String
     var vehicle_make: String
@@ -23,7 +22,6 @@ final class CallRecord {
     var start_location: String
     var pickup_address: String
     var dropoff_address: String
-    var urgency_level: String
     var quoted_price: Double?
     var outcome: String
     var decline_reason: String
@@ -44,7 +42,6 @@ final class CallRecord {
         customer_phone = draft.customer_phone
         caller_type = draft.caller_type
         payer_name = draft.payer_name
-        lead_source = draft.lead_source
         service_requested = draft.service_requested
         vehicle_year = draft.vehicle_year
         vehicle_make = draft.vehicle_make
@@ -55,7 +52,6 @@ final class CallRecord {
         start_location = draft.start_location
         pickup_address = draft.pickup_address
         dropoff_address = draft.dropoff_address
-        urgency_level = draft.urgency_level
         quoted_price = draft.quotedPriceValue
         outcome = draft.outcome
         decline_reason = draft.outcome == ChipOptions.outcomeLost ? draft.decline_reason : ""
@@ -76,7 +72,6 @@ final class CallRecord {
             customer_phone: customer_phone,
             caller_type: caller_type,
             payer_name: payer_name,
-            lead_source: lead_source,
             service_requested: service_requested,
             vehicle_year: vehicle_year,
             vehicle_make: vehicle_make,
@@ -87,7 +82,6 @@ final class CallRecord {
             start_location: start_location,
             pickup_address: pickup_address,
             dropoff_address: dropoff_address,
-            urgency_level: urgency_level,
             quoted_price: quoted_price,
             outcome: outcome,
             decline_reason: decline_reason,
@@ -104,7 +98,6 @@ struct SyncPayload: Encodable, Sendable {
     let customer_phone: String
     let caller_type: String
     let payer_name: String
-    let lead_source: String
     let service_requested: String
     let vehicle_year: String
     let vehicle_make: String
@@ -115,7 +108,6 @@ struct SyncPayload: Encodable, Sendable {
     let start_location: String
     let pickup_address: String
     let dropoff_address: String
-    let urgency_level: String
     let quoted_price: Double?
     let outcome: String
     let decline_reason: String

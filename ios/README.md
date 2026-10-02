@@ -15,6 +15,28 @@ This is an offline-first data pusher (SwiftUI, SwiftData, Swift 6, iOS 17+). It 
 
 The project uses a synchronized folder: any file added under `OptiTow/` joins the target automatically.
 
+### Testing sync locally (no Google deployment)
+
+`tests/mock-webhook.js` runs the real `apps-script/Code.gs` against an in-memory sheet. Debug builds accept a plain `http` URL, but only for localhost.
+
+1. Start the mock server from the repo root:
+
+   ```bash
+   node tests/mock-webhook.js
+   ```
+
+2. In `Secrets.plist`, set `WEBHOOK_URL` to `http://127.0.0.1:8787/exec` and `API_SECRET` to `test-api-secret`.
+3. Run the app in the Simulator.
+
+Endpoints for checking results and simulating failures:
+
+| Command | Effect |
+|---|---|
+| `curl localhost:8787/rows` | Shows the rows the sheet would contain |
+| `curl -X POST localhost:8787/__mode/busy` | The server answers `BUSY` |
+| `curl -X POST localhost:8787/__mode/down` | The server drops connections |
+| `curl -X POST localhost:8787/__mode/ok` | Back to normal |
+
 ## Layout
 
 ```

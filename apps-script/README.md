@@ -43,6 +43,8 @@ Apps Script always answers **HTTP 200**, even when a request fails, so clients m
 ### iOS app: `POST <exec-url>`
 The body follows the payload in `SCHEMA.md`, with `token` set to `API_SECRET`. `call_id` is required.
 
+`lead_source` and `urgency_level` are not part of the app payload. If an older build still sends them, they are ignored. `Lead_Source` is for CallRail attribution and `Urgency_Level` for the Phase 3 AI worker.
+
 - **Upsert:** if a row with that `call_id` already exists, it is updated. Offline-queue retries are safe.
 - **Claiming a CallRail or website row:** otherwise, if there is a row that meets all of these, the app's fields are written into it and its `Call_ID` becomes the app's UUID:
   - same phone number,

@@ -4,144 +4,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const crypto = require('node:crypto');
-const fs = require('node:fs');
-const path = require('node:path');
-const vm = require('node:vm');
-
-const SOURCE = fs.readFileSync(path.join(__dirname, '..', 'apps-script', 'Code.gs'), 'utf8');
-const API_SECRET = 'test-api-secret';
-const WEBSITE_SECRET = 'test-website-secret';
-
-// --- Mocks ------------------------------------------------------------------
-
-class MockSheet {
-  constructor(name) {
-    this.name = name;
-    this.data = [];
-    this.maxRows = 1000;
-    this.formats = {};
-  }
-  getLastRow() {
-    for (let r = this.data.length; r > 0; r--) {
-      if ((this.data[r - 1] || []).some((v) => v !== '' && v !== undefined)) return r;
-    }
-    return 0;
-  }
-  getLastColumn() {
-    return this.data.reduce((m, row) => {
-      let last = 0;
-      (row || []).forEach((v, i) => { if (v !== '' && v !== undefined) last = i + 1; });
-      return Math.max(m, last);
-    }, 0);
-  }
-  getMaxRows() { return this.maxRows; }
-  insertRowsAfter(_after, n) { this.maxRows += n; }
-  setFrozenRows() {}
-  clearContents() { this.data = []; }
-  getRange(row, col, numRows = 1, numCols = 1) {
-    if (row < 1 || col < 1 || numRows < 1 || numCols < 1) throw new Error('Bad range');
-    if (row + numRows - 1 > this.maxRows) throw new Error('Range exceeds max rows');
-    const sheet = this;
-    const cell = (r, c) => ((sheet.data[r - 1] || [])[c - 1] ?? '');
-    return {
-      getValues() {
-        const out = [];
-        for (let r = 0; r < numRows; r++) {
-          const line = [];
-          for (let c = 0; c < numCols; c++) line.push(cell(row + r, col + c));
-          out.push(line);
-        }
-        return out;
-      },
-      getValue() { return cell(row, col); },
-      setValues(values) {
-        assert.equal(values.length, numRows, 'setValues row count');
-        values.forEach((line, r) => {
-          assert.equal(line.length, numCols, 'setValues column count');
-          while (sheet.data.length < row + r) sheet.data.push([]);
-          line.forEach((v, c) => { sheet.data[row + r - 1][col + c - 1] = v; });
-        });
-        return this;
-      },
-      setNumberFormat(f) { sheet.formats[col] = f; return this; },
-    };
-  }
-}
-
-function makeContext(seed) {
-  const sheets = {};
-  const ss = {
-    getSheetByName: (n) => sheets[n] || null,
-    insertSheet: (n) => (sheets[n] = new MockSheet(n)),
-    setSpreadsheetTimeZone() {},
-  };
-  const cache = new Map();
-  const mapsCalls = [];
-  const ctx = {
-    console: { log() {}, warn() {}, error: console.error },
-    SpreadsheetApp: { getActiveSpreadsheet: () => ss, flush() {} },
-    LockService: { getScriptLock: () => ({ tryLock: () => true, releaseLock() {} }) },
-    PropertiesService: {
-      getScriptProperties: () => ({
-        getProperty: (k) => ({ API_SECRET, WEBSITE_SECRET })[k] || null,
-      }),
-    },
-    CacheService: {
-      getScriptCache: () => ({
-        get: (k) => (cache.has(k) ? cache.get(k) : null),
-        put: (k, v) => cache.set(k, v),
-      }),
-    },
-    Utilities: {
-      getUuid: () => crypto.randomUUID(),
-      DigestAlgorithm: { MD5: 'md5' },
-      computeDigest: (alg, s) => [...crypto.createHash(alg).update(s).digest()],
-      base64EncodeWebSafe: (bytes) => Buffer.from(bytes).toString('base64url'),
-    },
-    Maps: {
-      DirectionFinder: { Mode: { DRIVING: 'driving' } },
-      newDirectionFinder() {
-        const q = {};
-        const f = {
-          setOrigin(o) { q.o = o; return f; },
-          setDestination(d) { q.d = d; return f; },
-          setRegion() { return f; },
-          setMode() { return f; },
-          getDirections() {
-            mapsCalls.push(`${q.o} -> ${q.d}`);
-            if (q.d === 'nowhere') return { routes: [] };
-            // Deterministic fake distance: 16093.44 m = 10.0 mi
-            return { routes: [{ legs: [{ distance: { value: 16093.44 } }] }] };
-          },
-        };
-        return f;
-      },
-    },
-    ContentService: {
-      MimeType: { JSON: 'json' },
-      createTextOutput: (s) => ({ setMimeType: () => ({ content: s }) }),
-    },
-  };
-  vm.createContext(ctx);
-  vm.runInContext(SOURCE, ctx);
-  ctx.setup();
-  if (seed) seed(sheets['Call Log']);
-  return { ctx, sheet: sheets['Call Log'], ref: sheets['Reference Data'], mapsCalls };
-}
-
-function post(env, body, query = {}) {
-  const e = { parameter: query, postData: { contents: typeof body === 'string' ? body : JSON.stringify(body) } };
-  return JSON.parse(env.ctx.doPost(e).content);
-}
-
-function rowObj(env, rowNum) {
-  const header = env.sheet.data[0];
-  const row = env.sheet.data[rowNum - 1] || [];
-  return Object.fromEntries(header.map((h, i) => [h, row[i] ?? '']));
-}
-
-function dataRowCount(env) { return env.sheet.getLastRow() - 1; }
+const { API_SECRET, WEBSITE_SECRET, makeContext, post, rowObj, dataRowCount } = require('./support/gas-mock');
 
 function appPayload(overrides = {}) {
   return Object.assign({
@@ -151,7 +14,6 @@ function appPayload(overrides = {}) {
     customer_phone: '916-555-0199',
     caller_type: 'Private Cash',
     payer_name: 'Cash / Customer',
-    lead_source: 'Google Ads',
     service_requested: 'Standard Tow',
     vehicle_year: '2021',
     vehicle_make: 'Tesla',
@@ -162,7 +24,6 @@ function appPayload(overrides = {}) {
     start_location: 'I-80 Eastbound',
     pickup_address: 'I-80 & Madison Ave, Sacramento',
     dropoff_address: '123 Auto Body Way',
-    urgency_level: 'High / Stranded Hazard',
     quoted_price: 285.0,
     outcome: '1 - Won / Booked',
     decline_reason: '',
@@ -243,6 +104,35 @@ test('app: unknown chip values are stored but flagged', () => {
   assert.equal(res.ok, true);
   assert.equal(rowObj(env, res.row).Drivetrain, 'Hover');
   assert.match(res.warnings[0], /Drivetrain/);
+});
+
+test('app: new chip values are accepted without warnings', () => {
+  const env = makeContext();
+  const res = post(env, appPayload({
+    payer_name: 'Triple A (AAA)',
+    drivetrain: 'Hybrid',
+    service_requested: 'Winch Out + Tow',
+    vehicle_condition: 'Mechanical / Electrical Issue',
+  }));
+  assert.equal(res.ok, true);
+  assert.deepEqual(res.warnings, []);
+  const r = rowObj(env, res.row);
+  assert.equal(r.Payer_Name, 'Triple A (AAA)');
+  assert.equal(r.Drivetrain, 'Hybrid');
+  assert.equal(r.Service_Requested, 'Winch Out + Tow');
+  assert.equal(r.Vehicle_Condition, 'Mechanical / Electrical Issue');
+  assert.match(post(env, appPayload({ call_id: 'old', vehicle_condition: 'Collision / Wheel Damaged' })).warnings[0], /Vehicle_Condition/);
+});
+
+test('app: lead_source and urgency_level are no longer app-owned (stale builds cannot write them)', () => {
+  const env = makeContext();
+  const res = post(env, appPayload({ lead_source: 'Google Ads', urgency_level: 'Standard' }));
+  assert.equal(res.ok, true);
+  assert.deepEqual(res.warnings, []);
+  const r = rowObj(env, res.row);
+  assert.equal(r.Lead_Source, '');
+  assert.equal(r.Urgency_Level, '');
+  assert.ok(!r.Notes_Comments.includes('Google Ads'), 'ignored, not appended to notes');
 });
 
 test('callrail after app: merges marketing data without touching dispatcher fields', () => {

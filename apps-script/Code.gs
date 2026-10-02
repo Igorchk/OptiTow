@@ -41,13 +41,14 @@ const HEADERS = Object.freeze([
 ]);
 
 // JSON key (SCHEMA.md) -> sheet header. These are the dispatcher-owned columns.
+// Lead_Source (CallRail attribution) and Urgency_Level (Phase 3 AI) stay in the sheet but are
+// no longer sent by the app, so they are deliberately absent here.
 const APP_FIELDS = Object.freeze({
   call_id: 'Call_ID',
   date_time: 'Date_Time',
   customer_phone: 'Customer_Phone',
   caller_type: 'Caller_Type',
   payer_name: 'Payer_Name',
-  lead_source: 'Lead_Source',
   service_requested: 'Service_Requested',
   vehicle_year: 'Vehicle_Year',
   vehicle_make: 'Vehicle_Make',
@@ -58,7 +59,6 @@ const APP_FIELDS = Object.freeze({
   start_location: 'Start_Location',
   pickup_address: 'Pickup_Address',
   dropoff_address: 'Dropoff_Address',
-  urgency_level: 'Urgency_Level',
   quoted_price: 'Quoted_Price',
   outcome: 'Outcome',
   decline_reason: 'Decline_Reason',
@@ -73,14 +73,16 @@ const OUTCOME_WON = '1 - Won / Booked';
 const DECLINE_NA_WON = 'N/A - Won';
 const LEAD_SOURCE_WEBSITE = 'Website Form';
 
-// Allowed chip values (APP_SPEC.md §5–6). Also written to the Reference Data tab by setup().
+// Allowed values (APP_SPEC.md §5–6). Also written to the Reference Data tab by setup().
+// Lead_Source and Urgency_Level are not app chips any more; they remain here as the sheet's
+// vocabulary for the columns CallRail and the AI worker will fill.
 const ENUMS = Object.freeze({
   Caller_Type: ['Private Cash', 'Insurance / Motor Club', 'Commercial Fleet', 'Body Shop'],
-  Payer_Name: ['Cash / Customer', 'Agero', 'Geico', 'Allstate', 'State Farm', 'Swoop', 'Urgently', 'Other'],
+  Payer_Name: ['Cash / Customer', 'Triple A (AAA)', 'Agero', 'Geico', 'Allstate', 'State Farm', 'Swoop', 'Urgently', 'Other'],
   Lead_Source: ['Google Ads', 'Google Maps / Organic', 'Repeat / Direct', 'Motor Club Referral', LEAD_SOURCE_WEBSITE, 'Other'],
-  Service_Requested: ['Standard Tow', 'Flatbed / Specialty', 'Jump Start', 'Tire Change', 'Tire Patch', 'Lockout', 'Winch Out / Recovery'],
-  Drivetrain: ['FWD', 'RWD', 'AWD / 4WD', 'Electric Vehicle (EV)', 'Unknown'],
-  Vehicle_Condition: ['Rolling / Neutral', 'Locked in Park', 'No Keys', 'Flat Tire', 'Ditch / Mud / Winch', 'Collision / Wheel Damaged'],
+  Service_Requested: ['Standard Tow', 'Flatbed / Specialty', 'Jump Start', 'Tire Change', 'Tire Patch', 'Lockout', 'Winch Out Only', 'Winch Out + Tow'],
+  Drivetrain: ['FWD', 'RWD', 'AWD / 4WD', 'Electric Vehicle (EV)', 'Hybrid', 'Unknown'],
+  Vehicle_Condition: ['Rolling / Neutral', 'Locked in Park', 'No Keys', 'Flat Tire', 'Ditch / Mud / Winch', 'Collision', 'Wheel Damaged', 'Mechanical / Electrical Issue'],
   Scene_Location: ['Residential Driveway', 'Public Surface Street', 'Highway / Freeway Shoulder', 'Underground Parking Structure', 'Commercial Lot'],
   Urgency_Level: ['Standard', 'High / Stranded Hazard', 'Scheduled Later'],
   Outcome: [OUTCOME_WON, '0 - Lost / Declined'],
@@ -242,7 +244,7 @@ function normalizeDispatchRecord_(body, origin, warnings) {
 
   if (origin === 'website') {
     if (!rec.Customer_Phone && cleanValue_(body.phone) !== '') rec.Customer_Phone = cleanValue_(body.phone);
-    if (!rec.Lead_Source) rec.Lead_Source = LEAD_SOURCE_WEBSITE;
+    rec.Lead_Source = LEAD_SOURCE_WEBSITE;
     // Keep anything else the form sent (name, email, message…) in the notes.
     const extras = Object.keys(body)
       .filter(function (k) { return !(k in APP_FIELDS) && k !== 'phone' && k !== 'source'; })

@@ -11,10 +11,20 @@ struct AppConfig: Sendable {
               let data = try? Data(contentsOf: url),
               let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
               let urlString = (plist["WEBHOOK_URL"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
-              let webhookURL = URL(string: urlString), webhookURL.scheme == "https",
+              let webhookURL = URL(string: urlString), isAllowed(webhookURL),
               let secret = (plist["API_SECRET"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
               !secret.isEmpty
         else { return nil }
         return AppConfig(webhookURL: webhookURL, apiSecret: secret)
+    }
+
+    /// HTTPS only, except Debug builds may target a local mock server (tests/mock-webhook.js).
+    private static func isAllowed(_ url: URL) -> Bool {
+        if url.scheme == "https" { return true }
+        #if DEBUG
+        return url.scheme == "http" && ["localhost", "127.0.0.1"].contains(url.host() ?? "")
+        #else
+        return false
+        #endif
     }
 }

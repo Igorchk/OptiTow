@@ -54,12 +54,10 @@ test('iOS chip strings == Apps Script ENUMS', () => {
   const pairs = {
     callerType: 'Caller_Type',
     payerName: 'Payer_Name',
-    leadSource: 'Lead_Source',
     serviceRequested: 'Service_Requested',
     drivetrain: 'Drivetrain',
     vehicleCondition: 'Vehicle_Condition',
     sceneLocation: 'Scene_Location',
-    urgencyLevel: 'Urgency_Level',
   };
   for (const [swift, header] of Object.entries(pairs)) {
     assert.deepEqual(swiftArray(src, swift), [...ENUMS[header]], header);

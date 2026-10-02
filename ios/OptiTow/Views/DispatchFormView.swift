@@ -17,8 +17,10 @@ struct DispatchFormView: View {
         NavigationStack {
             ScrollViewReader { proxy in
                 ScrollView {
+                    // The scroll anchor lives outside the re-identified form so scrollTo
+                    // still finds it after a save swaps the form's identity.
+                    Color.clear.frame(height: 0).id("top")
                     VStack(alignment: .leading, spacing: 32) {
-                        Color.clear.frame(height: 0).id("top")
                         callerSection
                         jobSection
                         vehicleSection
@@ -87,9 +89,6 @@ struct DispatchFormView: View {
             FieldGroup(label: "Payer") {
                 ChipGrid(options: ChipOptions.payerName, selection: $draft.payer_name, minChipWidth: 105)
             }
-            FieldGroup(label: "Lead Source") {
-                ChipGrid(options: ChipOptions.leadSource, selection: $draft.lead_source)
-            }
         }
     }
 
@@ -97,9 +96,6 @@ struct DispatchFormView: View {
         FormSection(title: "Job") {
             FieldGroup(label: "Service") {
                 ChipGrid(options: ChipOptions.serviceRequested, selection: $draft.service_requested)
-            }
-            FieldGroup(label: "Urgency") {
-                ChipGrid(options: ChipOptions.urgencyLevel, selection: $draft.urgency_level, minChipWidth: 105)
             }
         }
     }
