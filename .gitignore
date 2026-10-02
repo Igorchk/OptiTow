@@ -6,3 +6,6 @@ xcuserdata/
 DerivedData/
 *.xcuserstate
 build/
+
+# iOS secrets (copy ios/Secrets.example.plist)
+ios/OptiTow/Config/Secrets.plist
