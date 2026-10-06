@@ -69,7 +69,9 @@ Configure this as the **post-call webhook**. It accepts both the v3 JSON body an
 | `campaign` / `utm_campaign` | `Campaign_Name` |
 | `duration` | `Call_Duration_Sec` |
 | `recording` / `recording_player` | `Call_Recording_URL` |
-| `source` + `medium` (or `source_name` / `utm_medium`) | `Lead_Source`, mapped as below |
+| `source` + `medium` (or `utm_medium`) | `Lead_Source`, mapped as below (`source_name` is the tracking number's label, so it is not used) |
+
+**Search keyword.** CallRail's `keywords` field holds what the visitor searched for. It is only populated for **paid ad** calls on **Website (Session) trackers**, so `Search_Keyword` is legitimately empty for Google My Business, Performance Max, organic and direct calls. The parser reads `keywords`, then falls back to `utm_term` and the older `search_keywords`. It skips empty values and ad-template placeholders that were never filled in (`{keyword}`, `(not set)`), and it never writes a blank over an existing keyword. `keywords_spotted` is words detected in the call audio and is deliberately not used. Each webhook writes one line to the Executions log with the payload's key names, `source`, `medium` and which keyword field was used (never the keyword text or the phone number), so you can audit what CallRail actually sent.
 
 **Lead source mapping.** The source and medium text is lowercased and the first matching rule wins:
 
