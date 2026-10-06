@@ -32,8 +32,16 @@ struct CallDraft: Equatable {
         return Double(cleaned)
     }
 
-    /// Outcome is the ML target, so it's the only field a save can't skip.
-    var canSave: Bool { !outcome.isEmpty }
+    /// The phone number's ASCII digits only, so "(916) 555-0199" and "+1 916-555-0199" count the
+    /// same as "9165550199". Matches the server, which strips every non-digit.
+    var phoneDigits: String { customer_phone.filter { $0.isASCII && $0.isNumber } }
+
+    /// The phone is the key for merging CallRail data into this call, so a call can't be saved
+    /// without a full number.
+    var hasValidPhone: Bool { phoneDigits.count >= 10 }
+
+    /// A call needs a usable phone number and an outcome (the ML target).
+    var canSave: Bool { hasValidPhone && !outcome.isEmpty }
 
     var isLost: Bool { outcome == ChipOptions.outcomeLost }
 }

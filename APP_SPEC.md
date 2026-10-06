@@ -33,6 +33,10 @@ Use these EXACT string values for the selection chips:
 
 The app must not show, store or POST either field.
 
+## 5b. Required Fields
+- `customer_phone` is **mandatory**: at least 10 digits, ignoring formatting (dashes, spaces, parentheses, a leading `+1`). The phone number is how CallRail data is merged into the call, so a call without one can't be saved. The "Save Call" button stays disabled and dimmed, and says what is missing, until the phone has 10 digits and an outcome is chosen.
+- The Apps Script enforces the same rule and answers `BAD_REQUEST` ("customer_phone is required and must be at least 10 digits.") for an app sync that breaks it.
+
 ## 6. The ML Target Variable
 - `outcome`: This must be a MASSIVE visual toggle button at the bottom: [1 - Won / Booked] or [0 - Lost / Declined].
 - `decline_reason`: ONLY show this chip grid if the Outcome is "0 - Lost". Options: [Price Too High, ETA Too Long, Already Found Help, Changed Mind].

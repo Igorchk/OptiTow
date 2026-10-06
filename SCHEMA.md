@@ -29,6 +29,10 @@ When the iOS app syncs, it must POST this exact `snake_case` structure:
 }
 ```
 
+## Field rules
+- `customer_phone` is required in the iOS payload: at least 10 digits once formatting is stripped. A sync without it is rejected with `BAD_REQUEST`. It is stored as `916-555-0199`.
+- `date_time` and `AI_Processed_At` are stored as whole seconds (no milliseconds) and displayed as `yyyy-mm-dd hh:mm:ss` in the sheet's time zone (Pacific), e.g. `2026-10-02 08:56:04`.
+
 ## Column layout (29 columns)
 Columns 1–21 are the dispatcher block. Everything after is automated ingestion, so a dispatcher write can never land on an automated column.
 
