@@ -195,7 +195,7 @@ struct DispatchFormView: View {
         Button {
             save(proxy: proxy)
         } label: {
-            Text(draft.canSave ? "Save Call" : "Pick Won or Lost to save")
+            Text(saveLabel)
                 .font(.title3.weight(.heavy))
                 .frame(maxWidth: .infinity, minHeight: 64)
                 .foregroundStyle(draft.canSave ? Color.black : Theme.textSecondary)
@@ -204,10 +204,19 @@ struct DispatchFormView: View {
         }
         .buttonStyle(.plain)
         .disabled(!draft.canSave)
+        .opacity(draft.canSave ? 1 : 0.55)
+        .animation(.easeOut(duration: 0.15), value: draft.canSave)
         .padding(.horizontal, 16)
         .padding(.top, 10)
         .padding(.bottom, 6)
         .background(.ultraThinMaterial)
+    }
+
+    /// Says what is still missing; the phone comes first because it is the first field on the form.
+    private var saveLabel: String {
+        if !draft.hasValidPhone { return "Enter a 10-digit phone to save" }
+        if draft.outcome.isEmpty { return "Pick Won or Lost to save" }
+        return "Save Call"
     }
 
     @ToolbarContentBuilder

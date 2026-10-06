@@ -43,6 +43,10 @@ Apps Script always answers **HTTP 200**, even when a request fails, so clients m
 ### iOS app: `POST <exec-url>`
 The body follows the payload in `SCHEMA.md`, with `token` set to `API_SECRET`. `call_id` is required.
 
+`customer_phone` is required and must contain at least 10 digits (formatting is ignored). Otherwise the sync is rejected with `{"ok": false, "code": "BAD_REQUEST", "error": "customer_phone is required and must be at least 10 digits."}` and no row is created. The iOS app never retries a `BAD_REQUEST` and parks the call as rejected. The rule applies to app syncs only, not to website leads or CallRail.
+
+`Date_Time` and `AI_Processed_At` are written as whole seconds (any milliseconds are dropped) and formatted `yyyy-mm-dd hh:mm:ss` on every write.
+
 `lead_source` and `urgency_level` are not part of the app payload. If an older build still sends them, they are ignored. `Lead_Source` is filled automatically (see CallRail and AI worker below), and `Urgency_Level` no longer exists.
 
 - **Upsert:** if a row with that `call_id` already exists, it is updated. Offline-queue retries are safe.

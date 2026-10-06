@@ -93,6 +93,66 @@ test('app: retry with same call_id updates instead of duplicating', () => {
   assert.equal(rowObj(env, 2).Quoted_Price, 300);
 });
 
+test('app: customer_phone must have at least 10 digits, ignoring formatting', () => {
+  const env = makeContext();
+  const expected = { ok: false, code: 'BAD_REQUEST', error: 'customer_phone is required and must be at least 10 digits.' };
+  for (const bad of ['', '   ', '916-555-019', '(916) 555-01', 'call me', '+1 (916) 555']) {
+    assert.deepEqual(post(env, appPayload({ customer_phone: bad })), expected, JSON.stringify(bad));
+  }
+  const noPhone = appPayload();
+  delete noPhone.customer_phone;
+  assert.deepEqual(post(env, noPhone), expected, 'missing key');
+  assert.equal(dataRowCount(env), 0, 'rejected syncs never create a row');
+
+  for (const [i, good] of ['9165550199', '916-555-0199', '(916) 555-0199', '+1 916-555-0199', '916.555.0199'].entries()) {
+    const res = post(env, appPayload({ call_id: `ok-${i}`, customer_phone: good }));
+    assert.equal(res.ok, true, good);
+    assert.equal(rowObj(env, res.row).Customer_Phone, '916-555-0199', `${good} is stored in one canonical format`);
+  }
+});
+
+test('phone rule is for dispatcher syncs only: website leads and CallRail are unchanged', () => {
+  const env = makeContext();
+  const web = post(env, { token: WEBSITE_SECRET, notes_comments: 'no phone given' }, { source: 'website' });
+  assert.equal(web.ok, true);
+  const cr = post(env, callRail({ customer_phone_number: '' }), CR_QUERY);
+  assert.equal(cr.ok, true);
+  assert.ok(cr.warnings.length > 0);
+});
+
+test('timestamps are stored as whole seconds in yyyy-mm-dd hh:mm:ss, never with milliseconds', () => {
+  const env = makeContext();
+  env.sheet.formats = {}; // as in a sheet created before setup() ran
+  const col = (h) => env.sheet.data[0].indexOf(h) + 1;
+
+  // 1. iOS date_time carrying milliseconds
+  const app = post(env, appPayload({ date_time: '2026-10-02T15:56:04.788Z' }));
+  const dt = rowObj(env, app.row).Date_Time;
+  assert.equal(dt.getUTCMilliseconds(), 0);
+  assert.equal(dt.toISOString(), '2026-10-02T15:56:04.000Z');
+  assert.equal(env.sheet.formats[col('Date_Time')], 'yyyy-mm-dd hh:mm:ss');
+
+  // 2. no date_time at all -> server clock, still whole seconds
+  const noDate = appPayload({ call_id: 'no-date' });
+  delete noDate.date_time;
+  const serverTime = rowObj(env, post(env, noDate).row).Date_Time;
+  assert.equal(serverTime.getUTCMilliseconds(), 0);
+
+  // 3. CallRail start_time with milliseconds (new row)
+  const cr = post(env, callRail({ customer_phone_number: '+12795550123', start_time: '2026-10-02T14:40:00.999-07:00' }), CR_QUERY);
+  assert.equal(rowObj(env, cr.row).Date_Time.toISOString(), '2026-10-02T21:40:00.000Z');
+
+  // 4. AI_Processed_At is written from the server clock
+  post(env, { token: API_SECRET, action: 'update', call_id: cr.call_id, caller_tone: 'Calm' }, { source: 'ai' });
+  const processed = rowObj(env, cr.row).AI_Processed_At;
+  assert.equal(processed.getUTCMilliseconds(), 0);
+  assert.equal(env.sheet.formats[col('AI_Processed_At')], 'yyyy-mm-dd hh:mm:ss');
+
+  // 5. the worker's pending list has no fractional seconds either
+  const pending = post(env, { token: API_SECRET, action: 'pending' }, { source: 'ai' });
+  for (const item of pending.items) assert.doesNotMatch(item.date_time, /\.\d/);
+});
+
 test('app: missing call_id is rejected', () => {
   const env = makeContext();
   const res = post(env, appPayload({ call_id: '' }));

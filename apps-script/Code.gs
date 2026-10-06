@@ -72,6 +72,9 @@ const APP_FIELDS = Object.freeze({
   notes_comments: 'Notes_Comments',
 });
 
+// Columns holding timestamps: whole seconds, shown as yyyy-mm-dd hh:mm:ss.
+const DATE_HEADERS = Object.freeze(['Date_Time', 'AI_Processed_At']);
+
 const CALLRAIL_COLUMNS = Object.freeze([
   'Search_Keyword', 'Campaign_Name', 'Call_Duration_Sec', 'Call_Recording_URL',
 ]);
@@ -268,6 +271,12 @@ function normalizeDispatchRecord_(body, origin, warnings) {
     rec.Call_ID = Utilities.getUuid();
   }
   rec.Call_ID = String(rec.Call_ID);
+
+  // The phone number is the key for every CallRail merge, so a dispatcher call without a usable
+  // one would silently fail to merge and duplicate the call. Formatting is ignored when counting.
+  if (origin === 'app' && String(rec.Customer_Phone === undefined ? '' : rec.Customer_Phone).replace(/\D/g, '').length < 10) {
+    throw new ApiError('BAD_REQUEST', 'customer_phone is required and must be at least 10 digits.');
+  }
 
   if (rec.Date_Time !== undefined) {
     const parsed = parseDate_(rec.Date_Time);
@@ -482,7 +491,7 @@ function listPendingAudio_(body) {
       const time = toDate_(r[c.Date_Time]);
       items.push({
         call_id: String(r[c.Call_ID]),
-        date_time: time ? time.toISOString() : '',
+        date_time: time ? time.toISOString().replace(/\.\d{3}Z$/, 'Z') : '',
         customer_phone: String(r[c.Customer_Phone]),
         call_duration_sec: r[c.Call_Duration_Sec] === '' ? null : r[c.Call_Duration_Sec],
         call_recording_url: String(r[c.Call_Recording_URL]),
@@ -669,6 +678,16 @@ function writeCells_(log, rowNum, updates) {
   const values = range.getValues()[0];
   headers.forEach(function (h) { values[log.col[h] - lo] = toCell_(updates[h]); });
   range.setValues([values]);
+  formatDateCells_(log, rowNum, headers);
+}
+
+/** Pins the yyyy-mm-dd hh:mm:ss display on date cells, even in a sheet created before setup(). */
+function formatDateCells_(log, rowNum, headers) {
+  headers.forEach(function (h) {
+    if (DATE_HEADERS.indexOf(h) !== -1) {
+      log.sheet.getRange(rowNum, log.col[h] + 1).setNumberFormat(CONFIG.DATE_TIME_FORMAT);
+    }
+  });
 }
 
 function appendRecord_(log, updates) {
@@ -681,6 +700,7 @@ function appendRecord_(log, updates) {
   const values = new Array(log.width).fill('');
   Object.keys(updates).forEach(function (h) { values[log.col[h]] = toCell_(updates[h]); });
   sheet.getRange(rowNum, 1, 1, log.width).setValues([values]);
+  formatDateCells_(log, rowNum, Object.keys(updates));
   return rowNum;
 }
 
@@ -701,13 +721,18 @@ function isDate_(v) {
   return Object.prototype.toString.call(v) === '[object Date]';
 }
 
+/** Drops milliseconds so stored timestamps are always whole seconds. */
+function truncSeconds_(d) {
+  return new Date(Math.floor(d.getTime() / 1000) * 1000);
+}
+
 function parseDate_(v) {
-  if (isDate_(v)) return isNaN(v.getTime()) ? null : v;
+  if (isDate_(v)) return isNaN(v.getTime()) ? null : truncSeconds_(v);
   const s = String(v == null ? '' : v).trim();
   if (!s) return null;
   let d = new Date(s);
   if (isNaN(d.getTime())) d = new Date(s.replace(' ', 'T'));
-  return isNaN(d.getTime()) ? null : d;
+  return isNaN(d.getTime()) ? null : truncSeconds_(d);
 }
 
 /** Sheet cell -> Date (cells may hold Date objects or legacy text). */
@@ -741,7 +766,8 @@ function formatPhone_(v) {
 
 function toCell_(v) {
   if (v === undefined || v === null) return '';
-  if (isDate_(v) || typeof v === 'number' || typeof v === 'boolean') return v;
+  if (isDate_(v)) return truncSeconds_(v);
+  if (typeof v === 'number' || typeof v === 'boolean') return v;
   let s;
   if (Array.isArray(v)) s = v.map(String).join(', ');
   else if (typeof v === 'object') s = JSON.stringify(v);
