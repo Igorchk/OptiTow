@@ -71,6 +71,10 @@ Unanswered calls, dropped calls and recordings of a carrier or voicemail system 
 
 `Lead_Source` is never guessed for these calls. The thresholds and phrase list are constants in `guards.py`, covered by tests.
 
+### Calls CallRail no longer has
+
+If the recording API answers "This call is no longer available." and a one-off check of the API key and account id succeeds, the call is gone from CallRail (deleted, purged, or never in this account). That is not junk and not a failure: the row is stamped `AI_Processed_At` with `mark_processed`, its AI cells stay blank so analytics are not skewed, and it is never retried or parked. The run summary counts these as `unavailable`. If the account check fails, it is an ordinary retried failure instead, so a wrong key or account id can never retire real calls.
+
 ## How a run works
 
 1. **Lock.** It takes `worker.lock`. If another run holds it (a long batch), this run logs "Another run holds worker.lock" and exits 0.

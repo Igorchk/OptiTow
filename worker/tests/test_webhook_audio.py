@@ -6,6 +6,7 @@ import pytest
 from webhook import (
     AudioFetcher,
     FetchError,
+    RecordingUnavailable,
     PendingCall,
     WebhookClient,
     WebhookFatal,
@@ -299,3 +300,47 @@ def test_http_errors_from_the_api_endpoint_do_not_leak_the_account_number(tmp_pa
     with pytest.raises(FetchError) as err:
         api_fetcher(lambda r: httpx.Response(401)).fetch(APP_LINK, tmp_path)
     assert "HTTP 401" in str(err.value) and ACCOUNT not in str(err.value)
+
+
+# --- "This call is no longer available." -----------------------------------------------------------
+
+GONE = {"error": "This call is no longer available."}
+
+
+def test_a_vanished_call_is_recording_unavailable_once_the_account_checks_out(tmp_path):
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        if request.url.path.endswith("recording.json"):
+            return httpx.Response(200, json=GONE)
+        return httpx.Response(200, json={"id": "ACC1", "numeric_id": int(ACCOUNT)})
+
+    f = api_fetcher(handler)
+    with pytest.raises(RecordingUnavailable):
+        f.fetch(APP_LINK, tmp_path)
+    assert seen[-1] == f"https://api.callrail.com/v3/a/{ACCOUNT}.json"
+    with pytest.raises(RecordingUnavailable):
+        f.fetch(APP_LINK, tmp_path)
+    assert sum(u.endswith(f"{ACCOUNT}.json") for u in seen) == 1, "the account is verified once per run"
+
+
+def test_unavailable_with_a_bad_account_is_an_ordinary_retried_failure(tmp_path):
+    def handler(request):
+        if request.url.path.endswith("recording.json"):
+            return httpx.Response(200, json=GONE)
+        return httpx.Response(404, json={"error": "Not found"})
+
+    with pytest.raises(FetchError) as err:
+        api_fetcher(handler).fetch(APP_LINK, tmp_path)
+    assert not isinstance(err.value, RecordingUnavailable)
+    assert "account check failed" in str(err.value)
+
+
+def test_other_json_errors_stay_ordinary_failures(tmp_path):
+    def handler(request):
+        return httpx.Response(200, json={"error": "Rate limited"})
+
+    with pytest.raises(FetchError) as err:
+        api_fetcher(handler).fetch(APP_LINK, tmp_path)
+    assert not isinstance(err.value, RecordingUnavailable)
