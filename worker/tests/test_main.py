@@ -326,14 +326,18 @@ def test_bad_credentials_are_fatal(tmp_path):
 
 
 def test_load_config_validates_and_defaults():
-    env = {"CALLRAIL_API_KEY": " k ", "WEBHOOK_URL": "https://script.google.com/x/exec", "API_SECRET": "s"}
+    env = {"CALLRAIL_API_KEY": " k ", "CALLRAIL_ACCOUNT_ID": " 123456789 ",
+           "WEBHOOK_URL": "https://script.google.com/x/exec", "API_SECRET": "s"}
     cfg = load_config(env)
-    assert cfg.callrail_api_key == "k"
+    assert cfg.callrail_api_key == "k" and cfg.callrail_account_id == "123456789"
     assert cfg.whisper_model == "mlx-community/whisper-large-v3-turbo"
     assert cfg.llm_model == "mlx-community/Qwen2.5-7B-Instruct-4bit"
     for missing in env:
         with pytest.raises(FatalError, match=missing):
             load_config({k: v for k, v in env.items() if k != missing})
+    for bad in ("abc", "12 34", "123456789/", "a/../b"):
+        with pytest.raises(FatalError, match="numeric"):
+            load_config({**env, "CALLRAIL_ACCOUNT_ID": bad})
     with pytest.raises(FatalError, match="https"):
         load_config({**env, "WEBHOOK_URL": "http://script.google.com/x"})
     assert load_config({**env, "WEBHOOK_URL": "http://127.0.0.1:8787/exec"})
@@ -358,3 +362,49 @@ def test_logs_never_contain_recording_url_queries(tmp_path, caplog):
     for _ in range(main.MAX_FAILURES + 1):
         run_batch(CFG, d)
     assert "SECRET" not in caplog.text
+
+
+# --- readable failures and quiet logs ---------------------------------------------------------
+
+FFMPEG_BANNER = "\n".join(f"  configuration line {i} --enable-something" for i in range(40))
+
+
+def test_summarize_error_keeps_the_start_and_the_root_cause():
+    message = ("transcription failed: RuntimeError: Failed to load audio: ffmpeg version 9\n" + FFMPEG_BANNER
+               + "\n[in#0] Failed to find two consecutive MPEG audio frames.\n"
+               "Error opening input files: Invalid data found when processing input\n")
+    out = main.summarize_error(message)
+    assert len(out) <= 300 and "\n" not in out
+    assert out.startswith("transcription failed: RuntimeError")
+    assert out.endswith("Invalid data found when processing input")
+    assert "configuration line 0" not in out
+
+
+def test_summarize_error_leaves_short_messages_alone():
+    assert main.summarize_error("audio download failed: HTTP 404") == "audio download failed: HTTP 404"
+    assert main.summarize_error("") == ""
+
+
+def test_state_file_records_the_root_cause_of_a_transcription_crash(tmp_path):
+    class Crashing(FakeTranscriber):
+        def transcribe(self, path):
+            raise RuntimeError("Failed to load audio: ffmpeg version 9\n" + FFMPEG_BANNER
+                               + "\nError opening input files: Invalid data found when processing input")
+
+    run_batch(CFG, deps(tmp_path, [call(1)], transcriber=Crashing()))
+    entry = next(iter(json.loads((tmp_path / "state.json").read_text()).values()))
+    assert entry["last_error"].endswith("Invalid data found when processing input")
+    assert len(entry["last_error"]) <= 300
+
+
+def test_verbose_mode_silences_network_library_debug_logs():
+    import logging
+
+    main.configure_logging(verbose=True)
+    try:
+        assert logging.getLogger("worker").getEffectiveLevel() == logging.DEBUG
+        for noisy in ("httpx", "httpcore", "huggingface_hub"):
+            assert logging.getLogger(noisy).getEffectiveLevel() >= logging.WARNING, noisy
+        assert logging.getLogger("httpcore.http11").getEffectiveLevel() >= logging.WARNING
+    finally:
+        logging.getLogger().setLevel(logging.WARNING)

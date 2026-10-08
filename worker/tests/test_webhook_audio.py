@@ -16,7 +16,10 @@ from webhook import (
 )
 
 URL = "https://script.google.com/macros/s/ABC/exec"
+ACCOUNT = "123456789"  # obviously fake: the real account id lives only in worker/.env
 KEY = "cr-key-123"
+# The first bytes of a real MP3 (ID3 tag): non-printable, unlike an error page.
+MP3 = b"ID3\x03\x00\x00\x00\x00\x00\x15" + b"\x00" * 60
 AUTH = f"Token token={KEY}"
 
 
@@ -115,10 +118,10 @@ def test_direct_third_party_url_is_fetched_without_the_api_key(tmp_path):
 
     def handler(request):
         seen.append((str(request.url.host), request.headers.get("authorization")))
-        return httpx.Response(200, content=b"ID3audio", headers={"content-type": "audio/mpeg"})
+        return httpx.Response(200, content=MP3, headers={"content-type": "audio/mpeg"})
 
     path = fetcher(handler).fetch("https://media.example.com/rec/1.mp3?sig=abc", tmp_path, stem="a")
-    assert path.read_bytes() == b"ID3audio" and path.suffix == ".mp3"
+    assert path.read_bytes() == MP3 and path.suffix == ".mp3"
     assert seen == [("media.example.com", None)]
 
 
@@ -201,3 +204,98 @@ def test_network_failure_is_a_fetch_error(tmp_path):
 def test_redact_drops_the_query_string():
     assert redact("https://app.callrail.com/calls/1/recording?access_key=SECRET") == \
         "https://app.callrail.com/calls/1/recording"
+
+
+# --- documented API endpoint -------------------------------------------------------------------
+
+APP_LINK = "https://app.callrail.com/calls/CAL01a0ffd019f479a5a54db4bd9eb6101d/recording/redirect"
+API_LINK = f"https://api.callrail.com/v3/a/{ACCOUNT}/calls/CAL01a0ffd019f479a5a54db4bd9eb6101d/recording.json"
+
+
+def api_fetcher(handler, **kwargs):
+    return AudioFetcher(KEY, httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False),
+                        account_id=ACCOUNT, **kwargs)
+
+
+def test_app_links_are_fetched_through_the_documented_api_endpoint(tmp_path):
+    seen = []
+
+    def handler(request):
+        seen.append((str(request.url), request.headers.get("authorization")))
+        if request.url.host == "api.callrail.com":
+            return httpx.Response(302, headers={"location": "https://bucket.s3.amazonaws.com/rec.mp3?X-Amz-Sig=1"})
+        return httpx.Response(200, content=MP3, headers={"content-type": "audio/mpeg"})
+
+    api_fetcher(handler).fetch(APP_LINK + "?access_key=abc", tmp_path)
+    assert seen == [(API_LINK, AUTH), ("https://bucket.s3.amazonaws.com/rec.mp3?X-Amz-Sig=1", None)], \
+        "the app link is never requested, and the key never reaches the storage host"
+
+
+def test_resolve_only_rewrites_callrail_app_links():
+    f = AudioFetcher(KEY, account_id=ACCOUNT)
+    assert f.resolve(APP_LINK) == API_LINK
+    assert f.resolve(APP_LINK + "?access_key=abc") == API_LINK
+    assert f.resolve(API_LINK) == API_LINK, "already the API endpoint"
+    assert f.resolve("https://media.example.com/rec/CAL123/1.mp3") == "https://media.example.com/rec/CAL123/1.mp3"
+    assert f.resolve("https://app.callrail.com/dashboard") == "https://app.callrail.com/dashboard", "no call id"
+    assert f.resolve("https://callrail.com.evil.net/calls/CAL1/recording/redirect").startswith("https://callrail.com.evil")
+    assert AudioFetcher(KEY).resolve(APP_LINK) == APP_LINK, "without an account id nothing is rewritten"
+
+
+# --- reject non-audio before ffmpeg sees it -------------------------------------------------------
+
+
+@pytest.mark.parametrize("ctype,body", [
+    ("text/plain; charset=utf-8", b"Unauthorized"),
+    ("text/html", b"<html><body>Sign in</body></html>"),
+    ("application/xml", b"<error>nope</error>"),
+    ("application/json", None),  # JSON without a "url" is handled (and rejected) earlier
+])
+def test_non_audio_content_types_are_rejected_with_a_clear_message(tmp_path, ctype, body):
+    def handler(request):
+        if body is None:
+            return httpx.Response(200, json={"error": "nope"})
+        return httpx.Response(200, content=body, headers={"content-type": ctype})
+
+    with pytest.raises(FetchError) as err:
+        fetcher(handler).fetch("https://media.example.com/a.mp3", tmp_path)
+    assert not list(tmp_path.iterdir()), "nothing is left behind for ffmpeg"
+    if body is not None:
+        assert "not audio" in str(err.value) and ctype.split(";")[0] in str(err.value)
+
+
+def test_the_rejection_shows_a_short_snippet_of_what_came_back(tmp_path):
+    def handler(request):
+        return httpx.Response(200, content=b"Recording\nnot   available " + b"x" * 200, headers={"content-type": "text/plain"})
+
+    with pytest.raises(FetchError) as err:
+        fetcher(handler).fetch("https://media.example.com/a.mp3", tmp_path)
+    message = str(err.value)
+    assert 'starting "Recording not available' in message and "\n" not in message and len(message) < 200
+
+
+@pytest.mark.parametrize("ctype", ["audio/mpeg", "audio/x-wav", "video/mp4", "application/ogg"])
+def test_audio_content_types_are_accepted(tmp_path, ctype):
+    f = fetcher(lambda r: httpx.Response(200, content=MP3, headers={"content-type": ctype}))
+    assert f.fetch("https://media.example.com/a", tmp_path).read_bytes() == MP3
+
+
+@pytest.mark.parametrize("headers", [{"content-type": "application/octet-stream"}, {"content-type": "binary/octet-stream"}, {}])
+def test_generic_or_missing_types_are_accepted_only_if_the_bytes_are_binary(tmp_path, headers):
+    ok = fetcher(lambda r: httpx.Response(200, content=MP3, headers=headers))
+    assert ok.fetch("https://media.example.com/a.mp3", tmp_path).read_bytes() == MP3
+    page = fetcher(lambda r: httpx.Response(200, content=b"<html>Please sign in</html>", headers=headers))
+    with pytest.raises(FetchError, match="not audio"):
+        page.fetch("https://media.example.com/b.mp3", tmp_path, stem="page")
+    assert [p.name for p in tmp_path.iterdir()] == ["call.mp3"], "the rejected page was not kept"
+
+
+def test_account_number_is_masked_in_logged_urls():
+    assert redact(API_LINK) == "https://api.callrail.com/v3/a/<account>/calls/CAL01a0ffd019f479a5a54db4bd9eb6101d/recording.json"
+    assert ACCOUNT not in redact(API_LINK)
+
+
+def test_http_errors_from_the_api_endpoint_do_not_leak_the_account_number(tmp_path):
+    with pytest.raises(FetchError) as err:
+        api_fetcher(lambda r: httpx.Response(401)).fetch(APP_LINK, tmp_path)
+    assert "HTTP 401" in str(err.value) and ACCOUNT not in str(err.value)

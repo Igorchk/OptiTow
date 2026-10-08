@@ -34,6 +34,7 @@ cp .env.example .env     # then fill in the three values
 | Variable | Meaning |
 |---|---|
 | `CALLRAIL_API_KEY` | CallRail API key. Sent only to `*.callrail.com`. |
+| `CALLRAIL_ACCOUNT_ID` | Your CallRail account id: the number after `/a/` in the dashboard URL. Used to fetch recordings through the API. Required, and kept only in `.env`. |
 | `WEBHOOK_URL` | The Apps Script `/exec` URL (https). |
 | `API_SECRET` | Must equal the `API_SECRET` Script Property. |
 
@@ -89,22 +90,26 @@ The Apps Script validates the picklists again, so a bad value can't reach the sh
 
 ## Audio download
 
-Both shapes of CallRail recording link work:
-- A direct or signed media URL, possibly behind redirects, is fetched with no credentials.
-- The authenticated API URL (`api.callrail.com/.../recording.json`) is fetched with `Authorization: Token token=<CALLRAIL_API_KEY>`. It answers with JSON containing the real media URL, which is then fetched without the key.
+The sheet stores the link CallRail put in its webhook, usually `app.callrail.com/calls/CAL…/recording/redirect`. That link needs a browser session and answers a script with a placeholder page, not audio. So the worker takes the `CAL…` call id from it and requests CallRail's documented endpoint instead:
 
-The API key is never sent to a non-CallRail host. Redirects are followed manually so a redirect can't carry it elsewhere, and other `*.callrail.com` hosts only get it after answering 401/403. Only https URLs are accepted. Logs show URLs without their query strings, since those can contain access keys.
+`GET https://api.callrail.com/v3/a/{CALLRAIL_ACCOUNT_ID}/calls/{CAL…}/recording.json` with `Authorization: Token token=<CALLRAIL_API_KEY>`
+
+That answers with a redirect to the MP3, which is then downloaded **without** the key. Direct or signed media URLs from other hosts are still fetched as they are.
+
+Whatever comes back is checked before ffmpeg sees it. Anything that isn't audio (`text/plain`, `text/html`, JSON without a link, or a page served as generic binary) is rejected with a message such as `response is not audio (content-type text/plain, 41 bytes starting "…")`.
+
+The API key is never sent to a non-CallRail host. The account id is masked (`/a/<account>/`) wherever a URL is logged. Redirects are followed manually so a redirect can't carry it elsewhere, and other `*.callrail.com` hosts only get it after answering 401/403. Only https URLs are accepted. Logs show URLs without their query strings, since those can contain access keys.
 
 ## Errors and skipping
 
 | Situation | What happens |
 |---|---|
-| Download fails, ffmpeg can't read the file, model output never validates, or the server rejects that update | The row is skipped, counted, and logged. Other rows continue. |
+| Download fails or returns something that isn't audio, ffmpeg can't read the file, model output never validates, or the server rejects that update | The row is skipped, counted, and logged. Other rows continue. |
 | A recording fails 3 runs in a row | It is **parked** in `state.json` and no longer retried, so a few bad files can't crowd newer calls out of each batch. Delete its entry in `state.json` to retry. |
 | Sheet is busy or the network is down | The run stops cleanly and the next cron tick retries. This does not count against any recording. |
 | Wrong `API_SECRET`, wrong deployment access, or missing config | Exit code 2 with a clear message. |
 
-`state.json` stores only a hash of each recording URL, never the URL itself.
+`state.json` stores only a hash of each recording URL, never the URL itself. Its `last_error` keeps the start of the message and the **end** (the root cause), not a tool's long version banner. `-v` shows this worker's debug messages only; network-library logging stays off because it prints headers and cookies.
 
 ## Tests
 

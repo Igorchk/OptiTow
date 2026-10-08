@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import mimetypes
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
@@ -144,9 +145,20 @@ def is_callrail_host(host: str | None) -> bool:
 
 
 def redact(url: str) -> str:
-    """Host + path only: recording URLs can carry access keys in the query string."""
+    """Host + path only: recording URLs can carry access keys in the query string.
+
+    The CallRail account number in API paths is masked too, so it never lands in the logs.
+    """
     parts = urlsplit(url)
-    return f"{parts.scheme}://{parts.netloc}{parts.path}"
+    path = re.sub(r"/a/\d+/", "/a/<account>/", parts.path)
+    return f"{parts.scheme}://{parts.netloc}{path}"
+
+
+_CALL_ID = re.compile(r"/calls/(CAL[0-9A-Za-z]+)")
+
+# Content types that really are audio, even from storage that labels everything octet-stream.
+_AMBIGUOUS_TYPES = ("", "application/octet-stream", "binary/octet-stream", "application/x-octet-stream")
+_AUDIO_TYPES = ("application/ogg",)
 
 
 class AudioFetcher:
@@ -157,18 +169,42 @@ class AudioFetcher:
       * the authenticated API URL (``api.callrail.com/.../recording.json``), which answers with
         JSON ``{"url": "<media url>"}``.
 
+    When an account id is configured, a CallRail *app* link (``app.callrail.com/calls/CAL…/recording/
+    redirect``) is rewritten to the documented API endpoint
+    ``api.callrail.com/v3/a/{account}/calls/{CAL…}/recording.json``, which is the supported way to get
+    the audio and answers with a redirect to the MP3. The bare app link needs a browser session and
+    answers with a placeholder page instead of audio.
+
     The API key is only ever sent to ``*.callrail.com``: to api.callrail.com straight away, and to
     other CallRail hosts only after they answer 401/403. Redirects are followed by hand so the
     key can never leak to a third-party host (e.g. a storage bucket) mid-chain.
     """
 
-    def __init__(self, api_key: str, client: httpx.Client | None = None, max_bytes: int = MAX_AUDIO_BYTES) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        client: httpx.Client | None = None,
+        max_bytes: int = MAX_AUDIO_BYTES,
+        account_id: str = "",
+    ) -> None:
         self._api_key = api_key
         self._client = client or httpx.Client(timeout=120, follow_redirects=False)
         self._max_bytes = max_bytes
+        self._account_id = account_id.strip()
+
+    def resolve(self, url: str) -> str:
+        """The URL to request: CallRail app links become the documented API endpoint."""
+        parts = urlsplit(url)
+        match = _CALL_ID.search(parts.path)
+        if (self._account_id and match and parts.scheme == "https" and is_callrail_host(parts.hostname)
+                and parts.hostname != CALLRAIL_API_HOST):
+            api_url = f"https://{CALLRAIL_API_HOST}/v3/a/{self._account_id}/calls/{match.group(1)}/recording.json"
+            log.debug("Fetching %s through the recording API (%s)", match.group(1), redact(api_url))
+            return api_url
+        return url
 
     def fetch(self, url: str, dest_dir: Path, stem: str = "call") -> Path:
-        current = url
+        current = self.resolve(url)
         for _ in range(MAX_HOPS):
             parts = urlsplit(current)
             if parts.scheme != "https" or not parts.hostname:
@@ -214,18 +250,49 @@ class AudioFetcher:
         declared = response.headers.get("content-length")
         if declared and declared.isdigit() and int(declared) > self._max_bytes:
             raise FetchError(f"audio larger than {self._max_bytes} bytes")
+        # Audio and video containers are trusted by type; a generic type has to look like binary data.
+        trusted = content_type.startswith(("audio/", "video/")) or content_type in _AUDIO_TYPES
+        if not trusted and content_type not in _AMBIGUOUS_TYPES:
+            raise FetchError(self._not_audio(content_type, response))
+
         suffix = mimetypes.guess_extension(content_type) if content_type.startswith(("audio/", "video/")) else None
         suffix = suffix or Path(url_path).suffix or ".mp3"
         path = dest_dir / f"{stem}{suffix}"
         size = 0
-        with path.open("wb") as out:
-            for chunk in response.iter_bytes():
-                size += len(chunk)
-                if size > self._max_bytes:
-                    path.unlink(missing_ok=True)
-                    raise FetchError(f"audio larger than {self._max_bytes} bytes")
-                out.write(chunk)
-        if size == 0:
+        try:
+            with path.open("wb") as out:
+                for chunk in response.iter_bytes():
+                    if size == 0 and not trusted and _looks_like_text(chunk):
+                        raise FetchError(self._not_audio(content_type, response, chunk))
+                    size += len(chunk)
+                    if size > self._max_bytes:
+                        raise FetchError(f"audio larger than {self._max_bytes} bytes")
+                    out.write(chunk)
+            if size == 0:
+                raise FetchError("empty audio response")
+        except FetchError:
             path.unlink(missing_ok=True)
-            raise FetchError("empty audio response")
+            raise
         return path
+
+    @staticmethod
+    def _not_audio(content_type: str, response: httpx.Response, head: bytes | None = None) -> str:
+        """A clear reason plus a short look at what came back instead of audio."""
+        if head is None:
+            try:
+                head = next(response.iter_bytes(), b"")
+            except httpx.HTTPError:
+                head = b""
+        snippet = re.sub(r"\s+", " ", head[:80].decode("utf-8", "replace")).strip()
+        shown = f' starting "{snippet}"' if snippet and _looks_like_text(head) else ""
+        size = response.headers.get("content-length") or len(head)
+        return f"response is not audio (content-type {content_type or 'missing'}, {size} bytes{shown})"
+
+
+def _looks_like_text(head: bytes) -> bool:
+    """True if the first bytes are all printable ASCII/whitespace: an error page, not an audio file.
+
+    MP3, WAV, MP4, OGG and FLAC all carry non-printable bytes in their first few dozen bytes.
+    """
+    sample = head[:64]
+    return bool(sample) and all(b in (9, 10, 13) or 32 <= b < 127 for b in sample)

@@ -6,14 +6,14 @@
 #
 # What it does:
 #   1. Installs/verifies ffmpeg with Homebrew (needed by mlx-whisper).
-#   2. Asks for WEBHOOK_URL, API_SECRET and CALLRAIL_API_KEY.
+#   2. Asks for WEBHOOK_URL, API_SECRET, CALLRAIL_API_KEY and CALLRAIL_ACCOUNT_ID.
 #   3. Writes ios/OptiTow/Config/Secrets.plist and worker/.env (both git-ignored, owner-only).
 #   4. Creates worker/.venv, upgrades pip and installs worker/requirements.txt.
 #   5. Optionally pre-downloads the MLX model weights and installs the cron job.
 #
 # Skip the y/n prompts (e.g. for automation) with SETUP_CACHE_MODELS=y|n, SETUP_INSTALL_CRON=y|n
 # and SETUP_INSTALL_PYTHON=y|n. Values already exported as WEBHOOK_URL / API_SECRET /
-# CALLRAIL_API_KEY are used as the defaults.
+# CALLRAIL_API_KEY / CALLRAIL_ACCOUNT_ID are used as the defaults.
 
 set -euo pipefail
 
@@ -70,6 +70,10 @@ validate_url() {
     echo "http is accepted for local testing only; the iOS Release build needs https."; return 0
   fi
   echo "WEBHOOK_URL must be the https Apps Script /exec URL (no spaces or quotes)."; return 1
+}
+validate_account_id() {
+  if [[ "$1" =~ ^[0-9]+$ ]]; then return 0; fi
+  echo "The CallRail account id is the number after /a/ in your CallRail dashboard URL (digits only)."; return 1
 }
 validate_secret() {
   [ -n "$1" ] || { echo "This value is required."; return 1; }
@@ -145,6 +149,7 @@ echo "These are stored only in two git-ignored files on this machine."
 prompt_value WEBHOOK_URL "Apps Script WEBHOOK_URL (https .../exec)" 0 validate_url
 prompt_value API_SECRET "API_SECRET (same as the Apps Script property)" 1 validate_secret
 prompt_value CALLRAIL_API_KEY "CALLRAIL_API_KEY" 1 validate_secret
+prompt_value CALLRAIL_ACCOUNT_ID "CALLRAIL_ACCOUNT_ID (digits after /a/ in your CallRail dashboard URL)" 0 validate_account_id
 
 # --- 3. write config files -----------------------------------------------------------
 
@@ -158,10 +163,11 @@ mkdir -p "$WORKER" "$(dirname "$PLIST")"
   {
     echo "# Written by setup.sh. Git-ignored: never commit this file."
     printf "CALLRAIL_API_KEY='%s'\n" "$CALLRAIL_API_KEY"
+    printf "CALLRAIL_ACCOUNT_ID='%s'\n" "$CALLRAIL_ACCOUNT_ID"
     printf "WEBHOOK_URL='%s'\n" "$WEBHOOK_URL"
     printf "API_SECRET='%s'\n" "$API_SECRET"
     if [ -f "$ENV_FILE" ]; then
-      grep -vE '^(CALLRAIL_API_KEY|WEBHOOK_URL|API_SECRET)=|^# Written by setup\.sh' "$ENV_FILE" || true
+      grep -vE '^(CALLRAIL_API_KEY|CALLRAIL_ACCOUNT_ID|WEBHOOK_URL|API_SECRET)=|^# Written by setup\.sh' "$ENV_FILE" || true
     fi
   } > "$tmp"
   mv "$tmp" "$ENV_FILE"
