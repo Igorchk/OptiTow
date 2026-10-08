@@ -16,6 +16,6 @@ worker/.venv/
 worker/worker.lock
 worker/state.json
 worker/state.tmp
-worker/worker.log
+worker/worker.log*
 __pycache__/
 .pytest_cache/
