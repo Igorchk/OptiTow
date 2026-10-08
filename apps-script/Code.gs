@@ -31,6 +31,9 @@ const CONFIG = Object.freeze({
   LOCK_WAIT_MS: 20000,
   MAPS_CACHE_SECONDS: 6 * 60 * 60,
   AI_PENDING_DEFAULT_LIMIT: 25,
+  // Calls with less talk time than this are treated as dropped/unanswered, not as conversations.
+  // Keep equal to MIN_LIVE_CALL_SEC in worker/guards.py (a contract test enforces it).
+  MIN_LIVE_CALL_SEC: 15,
   ROW_GROWTH: 500,
 });
 
@@ -81,6 +84,8 @@ const CALLRAIL_COLUMNS = Object.freeze([
 
 const OUTCOME_WON = '1 - Won / Booked';
 const DECLINE_NA_WON = 'N/A - Won';
+// Written to Caller_Tone and Mentioned_Damage for calls with no genuine two-way conversation.
+const NOT_APPLICABLE = 'N/A';
 const LEAD_SOURCE_WEBSITE = 'Website Form';
 
 // Allowed values (APP_SPEC.md §5–6). Also written to the Reference Data tab by setup().
@@ -95,7 +100,7 @@ const ENUMS = Object.freeze({
   Vehicle_Condition: ['Rolling / Neutral', 'Locked in Park', 'No Keys', 'Flat Tire', 'Ditch / Mud / Winch', 'Collision', 'Wheel Damaged', 'Mechanical / Electrical Issue'],
   Scene_Location: ['Residential Driveway', 'Public Surface Street', 'Highway / Freeway Shoulder', 'Underground Parking Structure', 'Commercial Lot'],
   Outcome: [OUTCOME_WON, '0 - Lost / Declined'],
-  Caller_Tone: ['Calm', 'Stressed', 'Frustrated', 'Angry', 'Confused', 'Rushed', 'Price Shopping', 'Cooperative'],
+  Caller_Tone: ['Calm', 'Stressed', 'Frustrated', 'Angry', 'Confused', 'Rushed', 'Price Shopping', 'Cooperative', NOT_APPLICABLE],
   Decline_Reason: ['Price Too High', 'ETA Too Long', 'Already Found Help', 'Changed Mind', DECLINE_NA_WON],
 });
 
@@ -391,26 +396,43 @@ function handleCallRail_(body) {
     }
 
     let callId;
+    let aiSkipped = '';
     if (rowNum) {
+      const current = log.sheet.getRange(rowNum, 1, 1, log.width).getValues()[0];
       // Never overwrite an existing Lead_Source (e.g. a website lead that then phoned in).
       const updates = Object.assign({}, call.fields);
-      if (call.leadSource && isBlank_(log.sheet.getRange(rowNum, log.col.Lead_Source + 1).getValue())) {
-        updates.Lead_Source = call.leadSource;
+      if (call.leadSource && isBlank_(current[log.col.Lead_Source])) updates.Lead_Source = call.leadSource;
+      if (call.notLiveReason) {
+        // A dispatcher outcome proves a real conversation happened, whatever CallRail says, and an
+        // already-processed row is left alone.
+        if (!isBlank_(current[log.col.Outcome]) || !isBlank_(current[log.col.AI_Processed_At])) {
+          console.log('CallRail not-live verdict ignored: row already has a dispatcher outcome or AI result');
+        } else {
+          Object.assign(updates, notApplicableCells_(log, current));
+          aiSkipped = call.notLiveReason;
+        }
       }
       writeCells_(log, rowNum, updates);
-      callId = String(log.sheet.getRange(rowNum, log.col.Call_ID + 1).getValue());
+      callId = String(current[log.col.Call_ID]);
     } else {
       // Dispatcher columns stay blank; only identity + CallRail data are written.
       callId = Utilities.getUuid();
-      rowNum = appendRecord_(log, Object.assign({
+      const record = Object.assign({
         Call_ID: callId,
         Date_Time: call.time,
         Customer_Phone: call.phone,
-      }, call.leadSource ? { Lead_Source: call.leadSource } : {}, call.fields));
+      }, call.leadSource ? { Lead_Source: call.leadSource } : {}, call.fields);
+      if (call.notLiveReason) {
+        Object.assign(record, notApplicableCells_(log, null));
+        aiSkipped = call.notLiveReason;
+      }
+      rowNum = appendRecord_(log, record);
       action = 'created';
     }
 
-    return { action: action, call_id: callId, row: rowNum, warnings: warnings };
+    const result = { action: action, call_id: callId, row: rowNum, warnings: warnings };
+    if (aiSkipped) result.ai_skipped = aiSkipped;
+    return result;
   });
 }
 
@@ -441,6 +463,14 @@ function normalizeCallRail_(body) {
   const recording = pick('recording', 'recording_url', 'recording_player');
   if (recording !== '') fields.Call_Recording_URL = recording;
 
+  // CallRail has no talk-time field and `duration` can include ringing, so the best estimate of
+  // real talk time is the recording's length, falling back to `duration`.
+  const answered = toBool_(pick('answered'));
+  const voicemail = toBool_(pick('voicemail'));
+  const recordingSec = toNumber_(pick('recording_duration'));
+  const talkSec = recordingSec !== null ? recordingSec : duration;
+  const notLiveReason = notLiveReason_(answered, voicemail, talkSec);
+
   return {
     phone: rawPhone === '' ? '' : formatPhone_(rawPhone),
     phoneKey: phoneKey_(rawPhone),
@@ -450,6 +480,8 @@ function normalizeCallRail_(body) {
     // Only `source` is the marketing source; CallRail's `source_name` is the tracking number's
     // label, so it must not feed attribution.
     leadSource: mapLeadSource_(pick('source'), pick('medium', 'utm_medium')),
+    // Why this is not a live conversation ('' if it is), so AI analysis can be skipped entirely.
+    notLiveReason: notLiveReason,
     // What arrived, for the Executions log. Names and low-cardinality attribution only: no phone
     // number and no keyword text.
     diagnostics: {
@@ -457,9 +489,48 @@ function normalizeCallRail_(body) {
       source: String(pick('source')).slice(0, 60),
       medium: String(pick('medium', 'utm_medium')).slice(0, 60),
       has_campaign: campaign !== '',
+      answered: answered,
+      voicemail: voicemail,
+      talk_sec: talkSec,
+      not_live: notLiveReason || 'no',
       payload_keys: Object.keys(c).sort().join(','),
     },
   };
+}
+
+/**
+ * Why a CallRail call is not a live conversation, or '' if it is (or if we can't tell).
+ *   - `answered: false` means no one picked up (carrier message, ringing out). The exception is a
+ *     voicemail: CallRail may report those as unanswered even though the customer left a real
+ *     message, so they are judged by length and then by the transcript in the AI worker.
+ *   - Less than MIN_LIVE_CALL_SEC of talk time is a dropped call, whatever else CallRail says.
+ */
+function notLiveReason_(answered, voicemail, talkSec) {
+  if (answered === false && voicemail !== true) return 'not_answered';
+  if (talkSec !== null && talkSec < CONFIG.MIN_LIVE_CALL_SEC) return 'too_short';
+  return '';
+}
+
+/** true / false / null (unknown) from booleans, "true"/"false", "yes"/"no" and 1/0. */
+function toBool_(v) {
+  if (v === true || v === false) return v;
+  const s = String(v === undefined || v === null ? '' : v).trim().toLowerCase();
+  if (s === 'true' || s === '1' || s === 'yes') return true;
+  if (s === 'false' || s === '0' || s === 'no') return false;
+  return null;
+}
+
+/**
+ * AI cells for a call with no genuine conversation: tone and damage are N/A (distinct from "None",
+ * which means a real call where no damage was mentioned) and the row is stamped as processed so it
+ * never reaches the worker. Only blank cells are filled, like every other AI write.
+ */
+function notApplicableCells_(log, currentRow) {
+  const cells = { AI_Processed_At: new Date() };
+  ['Caller_Tone', 'Mentioned_Damage'].forEach(function (h) {
+    if (!currentRow || isBlank_(currentRow[log.col[h]])) cells[h] = NOT_APPLICABLE;
+  });
+  return cells;
 }
 
 // Where the paid-search keyword can live in a CallRail call. `keywords` is the documented field

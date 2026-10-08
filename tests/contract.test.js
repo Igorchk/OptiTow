@@ -14,7 +14,7 @@ const read = (p) => fs.readFileSync(path.join(root, p), 'utf8');
 function loadGs() {
   const ctx = {};
   vm.createContext(ctx);
-  vm.runInContext(read('apps-script/Code.gs') + '\nthis.__out = { APP_FIELDS, ENUMS, HEADERS };', ctx);
+  vm.runInContext(read('apps-script/Code.gs') + '\nthis.__out = { APP_FIELDS, ENUMS, HEADERS, CONFIG, NOT_APPLICABLE };', ctx);
   return ctx.__out;
 }
 
@@ -109,4 +109,13 @@ test('worker only writes keys the Apps Script AI endpoint accepts', () => {
   for (const key of [...workerFields, 'mark_processed', 'call_id', 'call_recording_url']) {
     assert.ok(accepted.includes(key), `${key} is read by applyAiResult_`);
   }
+});
+
+test('worker guards use the same junk-call threshold and N/A marker as the Apps Script', () => {
+  const { CONFIG, NOT_APPLICABLE, ENUMS } = loadGs();
+  const guards = read('worker/guards.py');
+  const schema = read('worker/schema.py');
+  assert.equal(Number(guards.match(/^MIN_LIVE_CALL_SEC = (\d+)/m)[1]), CONFIG.MIN_LIVE_CALL_SEC);
+  assert.equal(schema.match(/^NOT_APPLICABLE = "([^"]+)"/m)[1], NOT_APPLICABLE);
+  assert.ok(ENUMS.Caller_Tone.includes(NOT_APPLICABLE), 'N/A must be an allowed Caller_Tone');
 });

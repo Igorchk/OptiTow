@@ -8,8 +8,8 @@ It lives in its own directory so its Python dependencies stay separate from `ios
 
 | Column | Source | Rule |
 |---|---|---|
-| `Caller_Tone` | model | One of `Calm`, `Stressed`, `Frustrated`, `Angry`, `Confused`, `Rushed`, `Price Shopping`, `Cooperative` |
-| `Mentioned_Damage` | model | Short phrases the caller actually states (max 8, 80 characters each), or the explicit text `None` |
+| `Caller_Tone` | model | One of `Calm`, `Stressed`, `Frustrated`, `Angry`, `Confused`, `Rushed`, `Price Shopping`, `Cooperative`, or `N/A` when there is no real conversation |
+| `Mentioned_Damage` | model | Short phrases the caller actually states (max 8, 80 characters each), `None` for a real call with no damage mentioned, or `N/A` when there is no real conversation |
 | `Lead_Source` | model | One of the six values, **only if the cell is blank** after CallRail attribution |
 | `AI_Processed_At` | server | Set by the Apps Script when the update lands |
 
@@ -59,6 +59,17 @@ It prints the JSON it would send for each call. If it looks right, run it for re
 
 Cron's PATH is minimal, so the line above puts Homebrew's `ffmpeg` on it. `worker.log` is git-ignored; rotate it occasionally.
 
+## Calls that are not conversations
+
+Unanswered calls, dropped calls and recordings of a carrier or voicemail system would otherwise get an invented emotion. They are recorded as `N/A` (tone and damage) with `AI_Processed_At` set, so they leave the queue and are never retried. Cheapest check first:
+
+1. **Apps Script, at ingestion:** `answered` is false, or under 15 seconds of talk time (see the Apps Script README). These rows never reach the worker.
+2. **Worker, before downloading:** a pending row whose total duration is under 15 seconds (this covers rows stored before those fields were captured). No audio is fetched and no model is loaded.
+3. **Worker, after transcribing, before the LLM:** the transcript is effectively empty, or it contains carrier, IVR or voicemail phrases and almost no human speech once those sentences are set aside (`guards.py`). A voicemail greeting followed by a real customer message is still analyzed.
+4. **The prompt:** anything that gets through is told to answer `N/A` for tone rather than guess, and the worker then also writes `N/A` for damage and does not write a lead-source guess.
+
+`Lead_Source` is never guessed for these calls. The thresholds and phrase list are constants in `guards.py`, covered by tests.
+
 ## How a run works
 
 1. **Lock.** It takes `worker.lock`. If another run holds it (a long batch), this run logs "Another run holds worker.lock" and exits 0.
@@ -88,7 +99,7 @@ The API key is never sent to a non-CallRail host. Redirects are followed manuall
 
 | Situation | What happens |
 |---|---|
-| Download fails, ffmpeg can't read the file, transcript is empty or under 20 characters (silence/voicemail), model output never validates, or the server rejects that update | The row is skipped, counted, and logged. Other rows continue. |
+| Download fails, ffmpeg can't read the file, model output never validates, or the server rejects that update | The row is skipped, counted, and logged. Other rows continue. |
 | A recording fails 3 runs in a row | It is **parked** in `state.json` and no longer retried, so a few bad files can't crowd newer calls out of each batch. Delete its entry in `state.json` to retry. |
 | Sheet is busy or the network is down | The run stops cleanly and the next cron tick retries. This does not count against any recording. |
 | Wrong `API_SECRET`, wrong deployment access, or missing config | Exit code 2 with a clear message. |

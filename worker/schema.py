@@ -20,6 +20,7 @@ CallerTone = Literal[
     "Rushed",
     "Price Shopping",
     "Cooperative",
+    "N/A",
 ]
 
 LeadSource = Literal[
@@ -38,6 +39,11 @@ LEAD_SOURCES: tuple[str, ...] = get_args(LeadSource)
 DamageItem = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)]
 
 NO_DAMAGE = "None"
+
+# Written to Caller_Tone and Mentioned_Damage when a call has no genuine two-way conversation
+# (unanswered, dropped, carrier or voicemail prompts). Distinct from NO_DAMAGE, which means a real
+# conversation in which no damage was mentioned.
+NOT_APPLICABLE = "N/A"
 
 
 class Enrichment(BaseModel):
@@ -80,9 +86,29 @@ def to_update_fields(result: BaseModel) -> dict[str, object]:
     the explicit "None" so the cell is distinguishable from "not processed yet".
     """
     data = result.model_dump()
+    if data.get("caller_tone") == NOT_APPLICABLE:
+        # The model found no real conversation, so nothing else it said about the call can be
+        # trusted: damage is N/A and any lead-source guess is dropped, leaving the cell blank.
+        if "mentioned_damage" in data:
+            data["mentioned_damage"] = NOT_APPLICABLE
+        data.pop("lead_source", None)
+        return data
     if "mentioned_damage" in data:
         unique: dict[str, str] = {}
         for item in data["mentioned_damage"]:
             unique.setdefault(item.casefold(), item)
         data["mentioned_damage"] = list(unique.values()) or NO_DAMAGE
     return data
+
+
+def not_applicable_fields(blank_fields: Iterable[str]) -> dict[str, object]:
+    """Safe defaults for a call that never reached the LLM (unanswered, dropped, automated).
+
+    Only the cells that are still blank are filled, and ``lead_source`` is never guessed. If there
+    is nothing to fill, the row is just marked processed so it leaves the queue.
+    """
+    blank = set(blank_fields)
+    fields: dict[str, object] = {
+        name: NOT_APPLICABLE for name in ("caller_tone", "mentioned_damage") if name in blank
+    }
+    return fields or {"mark_processed": True}

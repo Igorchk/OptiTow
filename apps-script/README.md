@@ -71,6 +71,12 @@ Configure this as the **post-call webhook**. It accepts both the v3 JSON body an
 | `recording` / `recording_player` | `Call_Recording_URL` |
 | `source` + `medium` (or `utm_medium`) | `Lead_Source`, mapped as below (`source_name` is the tracking number's label, so it is not used) |
 
+**Junk calls (no conversation).** A call is closed at ingestion, with no audio download or AI analysis, when:
+- CallRail says `answered` is false (unless it is a voicemail, which can hold a real customer message and is judged later), or
+- there is less than **15 seconds** of talk, measured by `recording_duration` if CallRail sent it and by `duration` otherwise (`duration` can include ringing, and CallRail has no talk-time field).
+
+Such a row gets `Caller_Tone = N/A`, `Mentioned_Damage = N/A` and `AI_Processed_At`, so the worker never sees it. `Lead_Source`, the campaign and the rest of the CallRail data are still recorded. A row the dispatcher already logged an outcome for is never marked, because a conversation clearly happened. The webhook response carries `ai_skipped` with the reason, and the Executions log line shows `not_live`. The threshold is `CONFIG.MIN_LIVE_CALL_SEC`, and a contract test keeps it equal to the worker's.
+
 **Search keyword.** CallRail's `keywords` field holds what the visitor searched for. It is only populated for **paid ad** calls on **Website (Session) trackers**, so `Search_Keyword` is legitimately empty for Google My Business, Performance Max, organic and direct calls. The parser reads `keywords`, then falls back to `utm_term` and the older `search_keywords`. It skips empty values and ad-template placeholders that were never filled in (`{keyword}`, `(not set)`), and it never writes a blank over an existing keyword. `keywords_spotted` is words detected in the call audio and is deliberately not used. Each webhook writes one line to the Executions log with the payload's key names, `source`, `medium` and which keyword field was used (never the keyword text or the phone number), so you can audit what CallRail actually sent.
 
 **Lead source mapping.** The source and medium text is lowercased and the first matching rule wins:
@@ -119,7 +125,7 @@ Write results:
 - **Columns written:** only `Caller_Tone`, `Mentioned_Damage`, `Lead_Source` and `AI_Processed_At` (set to server time). Any other keys are ignored. Arrays for `mentioned_damage` are stored comma-joined.
 - **At least one of `caller_tone`, `mentioned_damage`, `lead_source` or `"mark_processed": true` is required.** `mark_processed` only sets `AI_Processed_At`. It retires a row whose AI cells were all filled by hand.
 - **Fill-only-if-blank.** Each of the three cells is written only if it is currently empty (an existing value is ignored and reported in `warnings`). The `pending` items carry the current `caller_tone`, `mentioned_damage` and `lead_source`, so a worker only asks the model for the blanks. To re-run a row, clear those cells first.
-- **Picklists.** `caller_tone` must be one of `Calm`, `Stressed`, `Frustrated`, `Angry`, `Confused`, `Rushed`, `Price Shopping`, `Cooperative`. `lead_source` must be one of the six `Lead_Source` values. Anything else is ignored with a warning, and the request still succeeds.
+- **Picklists.** `caller_tone` must be one of `Calm`, `Stressed`, `Frustrated`, `Angry`, `Confused`, `Rushed`, `Price Shopping`, `Cooperative`, `N/A`. `lead_source` must be one of the six `Lead_Source` values. Anything else is ignored with a warning, and the request still succeeds.
 - **Send `call_recording_url` too.** If the iOS app claims a CallRail row while the worker is processing it, that row's `call_id` changes, and the recording URL is how the update still finds it.
 
 CallRail's v3 `recording` URL is an API endpoint that needs a CallRail API key. Phase 3 will fetch audio with that key.

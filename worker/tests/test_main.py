@@ -15,9 +15,9 @@ CFG = Config(callrail_api_key="k", webhook_url="https://script.google.com/x/exec
 LONG = "Hi, my car has a flat tire and the front bumper is dented. I found you on Google Maps."
 
 
-def call(n=1, tone="", damage="", lead=""):
+def call(n=1, tone="", damage="", lead="", dur=None):
     return PendingCall(call_id=f"c{n}", call_recording_url=f"https://media.example.com/r{n}.mp3?key=SECRET",
-                       caller_tone=tone, mentioned_damage=damage, lead_source=lead)
+                       caller_tone=tone, mentioned_damage=damage, lead_source=lead, call_duration_sec=dur)
 
 
 class FakeWebhook:
@@ -55,12 +55,13 @@ class FakeFetcher:
 class FakeTranscriber:
     """Audio files are named after FailureState.key(call), so tests can target one recording."""
 
-    def __init__(self):
-        self.heard = []
+    def __init__(self, by_call=None, default=LONG):
+        self.by_call = {FailureState.key(c): text for c, text in (by_call or {}).items()}
+        self.default, self.heard = default, []
 
     def transcribe(self, path):
         self.heard.append(path.stem)
-        return LONG
+        return self.by_call.get(path.stem, self.default)
 
 
 class FakeEnricher:
@@ -163,16 +164,99 @@ def test_transcription_crash_is_isolated(tmp_path):
     assert summary.skipped == 1 and [u[0] for u in d.webhook.updates] == ["c2"]
 
 
-def test_silent_recordings_are_skipped_not_enriched(tmp_path):
-    class Silent(FakeTranscriber):
-        def transcribe(self, path):
-            return "Thank you."
+# --- junk calls: recorded as N/A, never analyzed -------------------------------------------------
 
+NA_BOTH = {"caller_tone": "N/A", "mentioned_damage": "N/A"}
+CARRIER = "Sorry, your call cannot be completed as dialed."
+
+
+def test_silent_or_tiny_recordings_are_recorded_as_na_and_leave_the_queue(tmp_path):
     enricher = FakeEnricher()
-    d = deps(tmp_path, [call(1)], transcriber=Silent(), enricher=enricher)
+    d = deps(tmp_path, [call(1)], transcriber=FakeTranscriber(default="Thank you."), enricher=enricher)
     summary = run_batch(CFG, d)
-    assert summary.skipped == 1 and enricher.asked == [] and d.webhook.updates == []
-    assert d.events == ["whisper loaded", "whisper released"], "LLM never loaded with nothing to do"
+    assert d.webhook.updates == [("c1", NA_BOTH)], "no lead_source guess either"
+    assert (summary.not_conversation, summary.skipped, summary.updated) == (1, 0, 1)
+    assert enricher.asked == []
+    assert d.events == ["whisper loaded", "whisper released"], "LLM never loaded"
+
+
+def test_short_calls_download_no_audio_and_load_no_model(tmp_path):
+    fetcher = FakeFetcher()
+    d = deps(tmp_path, [call(1, dur=8)], fetcher=fetcher)
+    summary = run_batch(CFG, d)
+    assert d.webhook.updates == [("c1", NA_BOTH)]
+    assert fetcher.fetched == [] and d.events == []
+    assert summary.not_conversation == 1
+
+
+def test_the_short_call_threshold_is_15_seconds(tmp_path):
+    fetcher = FakeFetcher()
+    d = deps(tmp_path, [call(1, dur=14), call(2, dur=15), call(3, dur=145), call(4, dur=None)], fetcher=fetcher)
+    run_batch(CFG, d)
+    assert dict(d.webhook.updates)["c1"] == NA_BOTH, "14s is junk"
+    assert len(fetcher.fetched) == 3, "15s and longer (or unknown) are transcribed"
+
+
+def test_carrier_transcripts_never_reach_the_llm_but_real_calls_still_do(tmp_path):
+    enricher = FakeEnricher()
+    transcriber = FakeTranscriber(by_call={call(1): CARRIER})
+    d = deps(tmp_path, [call(1), call(2)], transcriber=transcriber, enricher=enricher)
+    summary = run_batch(CFG, d)
+    sent = dict(d.webhook.updates)
+    assert sent["c1"] == NA_BOTH
+    assert sent["c2"]["caller_tone"] == "Stressed"
+    assert len(enricher.asked) == 1, "only the real call used the model"
+    assert (summary.not_conversation, summary.updated) == (1, 2)
+
+
+def test_a_voicemail_with_a_real_customer_message_is_analyzed(tmp_path):
+    message = ("Hi, my truck broke down on the westbound shoulder near the Madison exit and the front "
+               "tire is flat, I need a tow as soon as you can get here, please call me back.")
+    enricher = FakeEnricher()
+    d = deps(tmp_path, [call(1)], transcriber=FakeTranscriber(default=f"Please leave a message after the tone. {message}"),
+             enricher=enricher)
+    summary = run_batch(CFG, d)
+    assert len(enricher.asked) == 1 and summary.not_conversation == 0
+
+
+def test_na_only_fills_cells_that_are_still_blank(tmp_path):
+    d = deps(tmp_path, [call(1, tone="Calm", dur=5), call(2, tone="Calm", damage="x", dur=5),
+                        call(3, damage="None", lead="Other", dur=5)])
+    run_batch(CFG, d)
+    sent = dict(d.webhook.updates)
+    assert sent["c1"] == {"mentioned_damage": "N/A"}
+    assert sent["c2"] == {"mark_processed": True}, "only lead_source is blank, and it is never guessed"
+    assert sent["c3"] == {"caller_tone": "N/A"}
+
+
+def test_a_model_that_answers_na_is_recorded_without_a_lead_source_guess(tmp_path):
+    answer = {"caller_tone": "N/A", "mentioned_damage": ["flat tire"], "lead_source": "Google Ads"}
+    d = deps(tmp_path, [call(1)], enricher=FakeEnricher(answer=answer))
+    summary = run_batch(CFG, d)
+    assert d.webhook.updates == [("c1", NA_BOTH)]
+    assert summary.not_conversation == 1
+
+
+def test_junk_is_not_a_failure_and_is_never_parked(tmp_path):
+    for _ in range(main.MAX_FAILURES + 2):
+        d = deps(tmp_path, [call(1, dur=3)])
+        run_batch(CFG, d)
+        assert d.webhook.updates == [("c1", NA_BOTH)]
+    state_file = tmp_path / "state.json"
+    assert not state_file.exists() or json.loads(state_file.read_text()) == {}
+
+
+def test_junk_dry_run_reports_without_writing(tmp_path):
+    d = deps(tmp_path, [call(1, dur=3)])
+    summary = run_batch(CFG, d, dry_run=True)
+    assert d.webhook.updates == [] and summary.results == [("c1", NA_BOTH)] and summary.not_conversation == 1
+
+
+def test_a_busy_sheet_while_recording_junk_stops_the_run_without_blaming_the_row(tmp_path):
+    wh = FakeWebhook([call(1, dur=3), call(2)], update_errors={"c1": WebhookTransient("BUSY")})
+    summary = run_batch(CFG, deps(tmp_path, [], webhook=wh))
+    assert summary.stopped_early and wh.updates == []
+    assert not FailureState(tmp_path / "state.json").is_parked(call(1, dur=3))
 
 
 def test_enrichment_error_writes_nothing_and_skips(tmp_path):
