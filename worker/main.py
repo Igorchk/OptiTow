@@ -26,7 +26,8 @@ from typing import Callable, ContextManager, Iterator, Mapping, Protocol
 from urllib.parse import urlsplit
 
 from enricher import DEFAULT_LLM_MODEL, DEFAULT_WHISPER_MODEL, EnrichmentError, MlxLlm, WhisperTranscriber
-from schema import to_update_fields
+from guards import MIN_LIVE_CALL_SEC, MIN_TRANSCRIPT_CHARS, classify_transcript, is_short_call
+from schema import not_applicable_fields, to_update_fields
 from webhook import (
     AudioFetcher,
     FetchError,
@@ -45,8 +46,6 @@ STATE_PATH = HERE / "state.json"
 # A recording that fails this many runs in a row is parked, so a few corrupt files can never
 # crowd newer calls out of each batch.
 MAX_FAILURES = 3
-# Whisper hallucinates short filler ("Thank you.") on silence; below this there is nothing to analyze.
-MIN_TRANSCRIPT_CHARS = 20
 
 log = logging.getLogger("worker")
 
@@ -184,13 +183,14 @@ class Summary:
     parked: int = 0
     updated: int = 0
     skipped: int = 0
+    not_conversation: int = 0  # unanswered, dropped or automated: recorded as N/A, no LLM used
     stopped_early: str | None = None
     results: list[tuple[str, dict]] = field(default_factory=list)  # (call_id, fields) in dry-run
 
     def line(self) -> str:
         extra = f", stopped early: {self.stopped_early}" if self.stopped_early else ""
         return (f"pending={self.pending} parked={self.parked} updated={self.updated} "
-                f"skipped={self.skipped}{extra}")
+                f"not_conversation={self.not_conversation} skipped={self.skipped}{extra}")
 
 
 def run_batch(cfg: Config, deps: Deps, *, dry_run: bool = False) -> Summary:
@@ -219,30 +219,10 @@ def run_batch(cfg: Config, deps: Deps, *, dry_run: bool = False) -> Summary:
         count = deps.state.record_failure(call, reason)
         log.warning("Skipping %s (failure %d/%d): %s", call.call_id, count, MAX_FAILURES, reason)
 
-    # Phase A: audio -> transcripts, with only the speech model in memory.
-    transcripts: dict[str, str] = {}
-    with tempfile.TemporaryDirectory(prefix="optitow-audio-") as tmp:
-        tmp_dir = Path(tmp)
-        needs_audio = [c for c in todo if c.blank_fields()]
-        with deps.transcriber() as transcriber:
-            for call in needs_audio:
-                try:
-                    audio = deps.fetcher.fetch(call.call_recording_url, tmp_dir, stem=deps.state.key(call))
-                    text = transcriber.transcribe(audio)
-                    audio.unlink(missing_ok=True)
-                except FetchError as exc:
-                    fail(call, f"audio download failed: {exc}")
-                    continue
-                except Exception as exc:  # a corrupt file must not take down the batch
-                    fail(call, f"transcription failed: {type(exc).__name__}: {exc}")
-                    continue
-                if len(text.strip()) < MIN_TRANSCRIPT_CHARS:
-                    fail(call, "transcript empty or too short (silence or voicemail?)")
-                    continue
-                transcripts[call.call_recording_url] = text
-
-    # Phase B: transcripts -> fields, with only the LLM in memory. Written row by row.
-    def push(call: PendingCall, fields: dict[str, object]) -> bool:
+    def push(call: PendingCall, fields: dict[str, object], *, junk: bool = False) -> bool:
+        """Write one row. False means the run must stop (sheet busy); the next cron tick retries."""
+        if junk:
+            summary.not_conversation += 1
         if dry_run:
             summary.results.append((call.call_id, fields))
             return True
@@ -262,11 +242,53 @@ def run_batch(cfg: Config, deps: Deps, *, dry_run: bool = False) -> Summary:
         summary.updated += 1
         return True
 
-    # Rows with every AI cell already filled by hand need no model: just retire them.
+    # Phase 0: rows that need no audio and no model.
+    #  * every AI cell already filled by hand: just retire the row;
+    #  * the call was too short to be a conversation (total duration includes ringing, so a short
+    #    total proves a short conversation): record N/A without even downloading the recording.
+    remaining: list[PendingCall] = []
     for call in todo:
-        if not call.blank_fields() and not push(call, {"mark_processed": True}):
-            return summary
+        blank = call.blank_fields()
+        if not blank:
+            if not push(call, {"mark_processed": True}):
+                return summary
+        elif is_short_call(call.call_duration_sec):
+            log.info("No conversation for %s: call lasted %ss (under %ss)",
+                     call.call_id, call.call_duration_sec, MIN_LIVE_CALL_SEC)
+            if not push(call, not_applicable_fields(blank), junk=True):
+                return summary
+        else:
+            remaining.append(call)
+    todo = remaining
 
+    # Phase A: audio -> transcripts, with only the speech model in memory. A recording of a carrier
+    # or voicemail system, or with no dialogue at all, is recorded as N/A here and never reaches
+    # the LLM.
+    transcripts: dict[str, str] = {}
+    if todo:
+        with tempfile.TemporaryDirectory(prefix="optitow-audio-") as tmp:
+            tmp_dir = Path(tmp)
+            with deps.transcriber() as transcriber:
+                for call in todo:
+                    try:
+                        audio = deps.fetcher.fetch(call.call_recording_url, tmp_dir, stem=deps.state.key(call))
+                        text = transcriber.transcribe(audio)
+                        audio.unlink(missing_ok=True)
+                    except FetchError as exc:
+                        fail(call, f"audio download failed: {exc}")
+                        continue
+                    except Exception as exc:  # a corrupt file must not take down the batch
+                        fail(call, f"transcription failed: {type(exc).__name__}: {exc}")
+                        continue
+                    verdict = classify_transcript(text)
+                    if verdict:
+                        log.info("No conversation for %s: %s", call.call_id, verdict)
+                        if not push(call, not_applicable_fields(call.blank_fields()), junk=True):
+                            return summary
+                        continue
+                    transcripts[call.call_recording_url] = text
+
+    # Phase B: transcripts -> fields, with only the LLM in memory. Written row by row.
     if transcripts:
         with deps.enricher() as enricher:
             for call in todo:
@@ -281,7 +303,11 @@ def run_batch(cfg: Config, deps: Deps, *, dry_run: bool = False) -> Summary:
                 except Exception as exc:
                     fail(call, f"enrichment failed: {type(exc).__name__}: {exc}")
                     continue
-                if not push(call, to_update_fields(result)):
+                fields = to_update_fields(result)
+                # The model itself found no real conversation (the prompt rule): same as the guards.
+                if fields.get("caller_tone") == "N/A":
+                    summary.not_conversation += 1
+                if not push(call, fields):
                     break
     return summary
 

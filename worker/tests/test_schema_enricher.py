@@ -4,7 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from enricher import Enricher, EnrichmentError, build_messages, extract_json
-from schema import CALLER_TONES, LEAD_SOURCES, Enrichment, model_for, to_update_fields
+from schema import CALLER_TONES, LEAD_SOURCES, Enrichment, model_for, not_applicable_fields, to_update_fields
 
 ALL = ["caller_tone", "mentioned_damage", "lead_source"]
 
@@ -20,7 +20,7 @@ def reply(**overrides):
 
 def test_picklists_are_the_agreed_values():
     assert CALLER_TONES == ("Calm", "Stressed", "Frustrated", "Angry", "Confused", "Rushed",
-                            "Price Shopping", "Cooperative")
+                            "Price Shopping", "Cooperative", "N/A")
     assert LEAD_SOURCES == ("Google Ads", "Google Maps / Organic", "Repeat / Direct",
                             "Motor Club Referral", "Website Form", "Other")
 
@@ -150,3 +150,43 @@ def test_enrich_gives_up_after_one_retry():
     with pytest.raises(EnrichmentError):
         Enricher(generate).enrich("t", ALL)
     assert len(calls) == 2, "one try plus exactly one retry"
+
+
+# --- junk calls --------------------------------------------------------------------------
+
+
+def test_prompt_forbids_guessing_emotion_for_automated_audio_and_names_only_requested_fields():
+    everything = build_messages("x", ALL)[0]["content"]
+    assert "do NOT guess a human emotion" in everything
+    assert '"N/A" for caller_tone' in everything and '"Other" for lead_source' in everything
+    assert "N/A" in everything.split("JSON schema")[1], "N/A is part of the allowed tone values"
+    only_tone = build_messages("x", ["caller_tone"])[0]["content"]
+    assert "do NOT guess a human emotion" in only_tone
+    assert "lead_source" not in only_tone and "mentioned_damage" not in only_tone
+
+
+def test_the_model_may_answer_na_for_tone():
+    result = Enricher(lambda m: reply(caller_tone="N/A", mentioned_damage=[])).enrich("t", ALL)
+    assert result.caller_tone == "N/A"
+
+
+def test_a_na_tone_overrides_the_rest_of_the_answer():
+    fields = to_update_fields(Enrichment.model_validate(
+        json.loads(reply(caller_tone="N/A", mentioned_damage=["flat tire"], lead_source="Google Ads"))))
+    assert fields == {"caller_tone": "N/A", "mentioned_damage": "N/A"}
+    partial = to_update_fields(model_for(["caller_tone", "mentioned_damage"]).model_validate(
+        {"caller_tone": "N/A", "mentioned_damage": ["x"]}))
+    assert partial == {"caller_tone": "N/A", "mentioned_damage": "N/A"}
+
+
+def test_a_real_call_with_no_damage_is_none_not_na():
+    fields = to_update_fields(Enrichment.model_validate(json.loads(reply(mentioned_damage=[]))))
+    assert fields["mentioned_damage"] == "None" and fields["caller_tone"] == "Calm"
+
+
+def test_not_applicable_fields_only_cover_blank_tone_and_damage():
+    assert not_applicable_fields(["caller_tone", "mentioned_damage", "lead_source"]) == \
+        {"caller_tone": "N/A", "mentioned_damage": "N/A"}
+    assert not_applicable_fields(["mentioned_damage"]) == {"mentioned_damage": "N/A"}
+    assert not_applicable_fields(["lead_source"]) == {"mark_processed": True}
+    assert not_applicable_fields([]) == {"mark_processed": True}

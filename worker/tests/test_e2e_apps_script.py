@@ -81,22 +81,32 @@ class FileFetcher:
 
 
 class SpeechModel:
+    def __init__(self, text="Hi, I have a flat tire on I-80 and I'm in a hurry. I found you on Google Maps."):
+        self.text = text
+
     def transcribe(self, path):
-        return "Hi, I have a flat tire on I-80 and I'm in a hurry. I found you on Google Maps."
+        return self.text
 
 
-def make_deps(base, tmp_path):
+class ForbiddenFetcher:
+    def fetch(self, *args, **kwargs):
+        raise AssertionError("audio must not be downloaded for this call")
+
+
+def make_deps(base, tmp_path, transcript=None, fetcher=None, llm_allowed=True):
     @contextlib.contextmanager
     def whisper():
-        yield SpeechModel()
+        yield SpeechModel() if transcript is None else SpeechModel(transcript)
 
     @contextlib.contextmanager
     def llm():
+        if not llm_allowed:
+            raise AssertionError("the LLM must not be loaded for this call")
         yield Enricher(scripted_llm)
 
     return Deps(
         webhook=WebhookClient(f"{base}/exec", SECRET, httpx.Client(follow_redirects=True)),
-        fetcher=FileFetcher(),
+        fetcher=fetcher or FileFetcher(),
         state=FailureState(tmp_path / "state.json"),
         transcriber=whisper,
         enricher=llm,
@@ -142,3 +152,32 @@ def test_dry_run_leaves_the_sheet_untouched(server, tmp_path):
 def test_audio_fetcher_class_is_wired_for_real_use():
     # Guards the constructor signature main.build_deps relies on.
     AudioFetcher("key", httpx.Client(follow_redirects=False))
+
+
+def test_unanswered_call_is_closed_at_ingestion_and_the_worker_never_sees_it(server, tmp_path):
+    callrail(server, 4, answered=False, source="Google Ads")
+    row = rows(server)["https://media.example.com/rec4.mp3"]
+    assert (row["Caller_Tone"], row["Mentioned_Damage"]) == ("N/A", "N/A")
+    assert row["AI_Processed_At"] and row["Lead_Source"] == "Google Ads"
+
+    summary = run_batch(CFG, make_deps(server, tmp_path, fetcher=ForbiddenFetcher(), llm_allowed=False))
+    assert summary.pending == 0
+
+
+def test_carrier_message_on_an_answered_looking_call_is_recorded_as_na_without_the_llm(server, tmp_path):
+    callrail(server, 5, source="Google Ads", duration="40")  # looks live: only the transcript gives it away
+    carrier = "We're sorry, your call cannot be completed as dialed."
+    summary = run_batch(CFG, make_deps(server, tmp_path, transcript=carrier, llm_allowed=False))
+    assert (summary.pending, summary.updated, summary.not_conversation, summary.skipped) == (1, 1, 1, 0)
+
+    row = rows(server)["https://media.example.com/rec5.mp3"]
+    assert (row["Caller_Tone"], row["Mentioned_Damage"]) == ("N/A", "N/A")
+    assert row["Lead_Source"] == "Google Ads", "CallRail attribution untouched"
+    assert row["AI_Processed_At"]
+    assert run_batch(CFG, make_deps(server, tmp_path, llm_allowed=False)).pending == 0
+
+
+def test_a_nine_second_call_is_closed_at_ingestion_from_its_duration_alone(server):
+    callrail(server, 6, duration="9")
+    row = rows(server)["https://media.example.com/rec6.mp3"]
+    assert (row["Caller_Tone"], row["Mentioned_Damage"]) == ("N/A", "N/A")

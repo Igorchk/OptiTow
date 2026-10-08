@@ -43,7 +43,7 @@ Columns 1–21 are the dispatcher block. Everything after is automated ingestion
 | 23–26 | `Search_Keyword`, `Campaign_Name`, `Call_Duration_Sec`, `Call_Recording_URL` | CallRail webhook |
 | 27–29 | `Caller_Tone`, `Mentioned_Damage`, `AI_Processed_At` | Phase 3 Mac Mini AI worker (`worker/`). Fill-only-if-blank: it never overwrites an existing value. |
 
-`Caller_Tone` picklist: `Calm`, `Stressed`, `Frustrated`, `Angry`, `Confused`, `Rushed`, `Price Shopping`, `Cooperative`. `Mentioned_Damage` is free text (short phrases, comma-separated) or `None`.
+`Caller_Tone` picklist: `Calm`, `Stressed`, `Frustrated`, `Angry`, `Confused`, `Rushed`, `Price Shopping`, `Cooperative`, `N/A`. **`N/A` in `Caller_Tone` and `Mentioned_Damage` marks a call with no genuine two-way conversation** (unanswered, dropped, or a recording of an automated system). Those rows have `AI_Processed_At` set and are not analyzed. Filter on it when building a dataset. It is different from `Mentioned_Damage = None`, which is a real call where no damage was mentioned. `Mentioned_Damage` is free text (short phrases, comma-separated) or `None`.
 
 `Lead_Source` picklist: `Google Ads`, `Google Maps / Organic`, `Repeat / Direct`, `Motor Club Referral`, `Website Form`, `Other`.
 

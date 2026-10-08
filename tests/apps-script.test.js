@@ -363,6 +363,134 @@ test('callrail lead source ignores source_name (the tracking number label), only
   assert.equal(rowObj(env, res.row).Lead_Source, '', 'left blank for the AI fallback, not mapped to Repeat / Direct');
 });
 
+// --- junk calls: unanswered / dropped calls never reach the AI -------------------------------
+
+const NA = 'N/A';
+
+function liveRow(env, extra = {}, n = 1) {
+  const call = callRail({ customer_phone_number: `+1279555${String(n).padStart(4, '0')}`, ...extra });
+  const res = post(env, call, CR_QUERY);
+  assert.equal(res.ok, true);
+  return { res, row: rowObj(env, res.row) };
+}
+
+test('callrail: an unanswered call is recorded as N/A and never queued for the AI', () => {
+  for (const [i, answered] of [false, 'false', 0, 'no'].entries()) {
+    const env = makeContext();
+    const { res, row } = liveRow(env, { answered, source: 'Google Ads' }, i);
+    assert.equal(res.ai_skipped, 'not_answered', JSON.stringify(answered));
+    assert.equal(row.Caller_Tone, NA);
+    assert.equal(row.Mentioned_Damage, NA);
+    assert.equal(Object.prototype.toString.call(row.AI_Processed_At), '[object Date]', 'stamped as processed');
+    assert.equal(row.Lead_Source, 'Google Ads', 'marketing attribution of a missed call is still real');
+    assert.equal(row.Call_Recording_URL, callRail().recording);
+    assert.equal(post(env, { token: API_SECRET, action: 'pending' }, { source: 'ai' }).count, 0, 'worker never sees it');
+  }
+});
+
+test('callrail: a short call is junk, judged by recording_duration first and duration as the fallback', () => {
+  const cases = [
+    // [fields, expected ai_skipped]
+    [{ answered: true, duration: '8' }, 'too_short'],
+    [{ answered: true, duration: '14' }, 'too_short'],
+    [{ answered: true, duration: '15' }, undefined],
+    [{ answered: true, duration: '145' }, undefined],
+    // ringing inflates `duration`; the recording's length is the better estimate of talk time
+    [{ answered: true, duration: '40', recording_duration: '9' }, 'too_short'],
+    [{ answered: true, duration: '12', recording_duration: '30' }, undefined],
+    [{ answered: true, duration: '60', recording_duration: '15' }, undefined],
+    [{ answered: true, duration: '60', recording_duration: '14' }, 'too_short'],
+    [{ answered: true, duration: '60', recording_duration: 0 }, 'too_short'],
+    // not enough information to judge: leave it to the worker
+    [{ answered: true }, undefined],
+  ];
+  cases.forEach(([fields, expected], i) => {
+    const env = makeContext();
+    const call = callRail({ customer_phone_number: `+1279555${String(i).padStart(4, '0')}`, ...fields });
+    if (!('duration' in fields)) delete call.duration;
+    const res = post(env, call, CR_QUERY);
+    assert.equal(res.ai_skipped, expected, JSON.stringify(fields));
+    const row = rowObj(env, res.row);
+    assert.equal(row.Caller_Tone, expected ? NA : '', JSON.stringify(fields));
+  });
+});
+
+test('callrail: a normal answered call is left for the AI', () => {
+  const env = makeContext();
+  const { res, row } = liveRow(env, { answered: true, duration: '145' });
+  assert.equal(res.ai_skipped, undefined);
+  assert.equal(row.Caller_Tone, '');
+  assert.equal(row.AI_Processed_At, '');
+  assert.equal(post(env, { token: API_SECRET, action: 'pending' }, { source: 'ai' }).count, 1);
+});
+
+test('callrail: voicemails are analyzed, because answered=false can still hold a real customer message', () => {
+  const env = makeContext();
+  // CallRail marks the call unanswered but a message was left: not auto-skipped on `answered`.
+  const left = liveRow(env, { answered: false, voicemail: true, duration: '75' }, 1);
+  assert.equal(left.res.ai_skipped, undefined);
+  assert.equal(left.row.Caller_Tone, '');
+  // ...but a voicemail that is just a hang-up is still too short to be a conversation.
+  const hangup = liveRow(env, { answered: false, voicemail: true, duration: '6' }, 2);
+  assert.equal(hangup.res.ai_skipped, 'too_short');
+});
+
+test('callrail: a dispatcher-logged outcome proves a conversation, so the junk verdict is not applied', () => {
+  const env = makeContext();
+  post(env, appPayload()); // dispatcher took the call and logged Won
+  const res = post(env, callRail({ answered: false }), CR_QUERY);
+  assert.equal(res.action, 'merged');
+  assert.equal(res.ai_skipped, undefined);
+  const row = rowObj(env, res.row);
+  assert.equal(row.Caller_Tone, '');
+  assert.equal(row.AI_Processed_At, '');
+  assert.equal(row.Search_Keyword, 'emergency tow truck', 'the CallRail data still merges');
+});
+
+test('callrail: junk rows merge into an outcome-less row, fill only blank AI cells, and repeats are idempotent', () => {
+  const env = makeContext();
+  const web = post(env, { token: WEBSITE_SECRET, phone: '916-555-0199', date_time: '2026-10-02T21:20:00Z' }, { source: 'website' });
+  const first = post(env, callRail({ answered: false }), CR_QUERY);
+  assert.equal(first.row, web.row);
+  assert.equal(first.ai_skipped, 'not_answered');
+  const again = post(env, callRail({ answered: false, duration: '3' }), CR_QUERY);
+  assert.equal(again.action, 'updated');
+  assert.equal(dataRowCount(env), 1);
+
+  // A result the AI already produced is never replaced by N/A.
+  const env2 = makeContext();
+  const done = post(env2, callRail(), CR_QUERY);
+  post(env2, { token: API_SECRET, action: 'update', call_id: done.call_id, caller_tone: 'Calm', mentioned_damage: 'flat tire' }, { source: 'ai' });
+  const late = post(env2, callRail({ answered: false }), CR_QUERY);
+  assert.equal(late.ai_skipped, undefined);
+  const row = rowObj(env2, done.row);
+  assert.equal(row.Caller_Tone, 'Calm');
+  assert.equal(row.Mentioned_Damage, 'flat tire');
+});
+
+test('callrail: the junk reason is logged without the phone number', () => {
+  const env = makeContext();
+  const logs = [];
+  env.ctx.console.log = (m) => logs.push(String(m));
+  liveRow(env, { answered: false });
+  const line = logs.find((l) => l.startsWith('CallRail webhook '));
+  const diag = JSON.parse(line.slice('CallRail webhook '.length));
+  assert.equal(diag.not_live, 'not_answered');
+  assert.equal(diag.answered, false);
+  assert.ok(!line.includes('916') && !line.includes('279555'));
+});
+
+test('ai: N/A is a valid Caller_Tone and Mentioned_Damage for the worker to record', () => {
+  const env = makeContext();
+  const cr = post(env, callRail(), CR_QUERY);
+  const res = post(env, { token: API_SECRET, action: 'update', call_id: cr.call_id, caller_tone: 'N/A', mentioned_damage: 'N/A' }, { source: 'ai' });
+  assert.deepEqual(res.warnings, []);
+  const row = rowObj(env, cr.row);
+  assert.equal(row.Caller_Tone, 'N/A');
+  assert.equal(row.Mentioned_Damage, 'N/A');
+  assert.equal(post(env, { token: API_SECRET, action: 'pending' }, { source: 'ai' }).count, 0);
+});
+
 test('callrail retry (same recording) is idempotent', () => {
   const env = makeContext();
   post(env, appPayload());
