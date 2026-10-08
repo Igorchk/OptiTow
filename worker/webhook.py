@@ -134,6 +134,16 @@ class FetchError(Exception):
     pass
 
 
+class RecordingUnavailable(FetchError):
+    """CallRail confirmed (with a verified account) that this call and its recording no longer exist.
+
+    Retrying can never help, so the batch retires the row instead of counting a failure.
+    """
+
+
+_UNAVAILABLE_MESSAGE = "no longer available"
+
+
 CALLRAIL_API_HOST = "api.callrail.com"
 MAX_AUDIO_BYTES = 200 * 1024 * 1024
 MAX_HOPS = 6
@@ -191,6 +201,7 @@ class AudioFetcher:
         self._client = client or httpx.Client(timeout=120, follow_redirects=False)
         self._max_bytes = max_bytes
         self._account_id = account_id.strip()
+        self._account_verified = False
 
     def resolve(self, url: str) -> str:
         """The URL to request: CallRail app links become the documented API endpoint."""
@@ -229,8 +240,13 @@ class AudioFetcher:
                 content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
                 if content_type in ("application/json", "text/json"):
                     response.read()
-                    media_url = response.json().get("url")
+                    body = response.json()
+                    media_url = body.get("url") if isinstance(body, dict) else None
                     if not media_url:
+                        error = str(body.get("error", "")) if isinstance(body, dict) else ""
+                        if parts.hostname == CALLRAIL_API_HOST and _UNAVAILABLE_MESSAGE in error.lower():
+                            self._verify_account()
+                            raise RecordingUnavailable(error.strip() or "call no longer available")
                         raise FetchError("recording JSON had no 'url'")
                     current = urljoin(current, str(media_url))
                     continue
@@ -238,6 +254,29 @@ class AudioFetcher:
             finally:
                 response.close()
         raise FetchError("too many redirects fetching audio")
+
+    def _verify_account(self) -> None:
+        """Prove the key and account id are good, so "no longer available" means the call, not our setup.
+
+        CallRail answers that message with HTTP 200, so a wrong account could look the same. Checked
+        once per run; any failure is an ordinary (retried) FetchError, never an orphan verdict.
+        """
+        if self._account_verified:
+            return
+        url = f"https://{CALLRAIL_API_HOST}/v3/a/{self._account_id}.json"
+        response = self._get(url, authed=True)
+        try:
+            ok = response.status_code == 200
+            if ok:
+                response.read()
+                ok = "error" not in (response.json() if isinstance(response.json(), dict) else {})
+        except ValueError:
+            ok = False
+        finally:
+            response.close()
+        if not ok:
+            raise FetchError("call unavailable, but the CallRail account check failed (key or account id wrong?)")
+        self._account_verified = True
 
     def _get(self, url: str, authed: bool) -> httpx.Response:
         headers = {"Authorization": f"Token token={self._api_key}"} if authed else {}

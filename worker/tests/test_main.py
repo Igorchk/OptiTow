@@ -9,7 +9,7 @@ import main
 from enricher import EnrichmentError
 from main import Config, Deps, FailureState, FatalError, load_config, run_batch, single_instance
 from schema import Enrichment, model_for
-from webhook import FetchError, PendingCall, WebhookFatal, WebhookRejected, WebhookTransient
+from webhook import FetchError, PendingCall, RecordingUnavailable, WebhookFatal, WebhookRejected, WebhookTransient
 
 CFG = Config(callrail_api_key="k", webhook_url="https://script.google.com/x/exec", api_secret="s")
 LONG = "Hi, my car has a flat tire and the front bumper is dented. I found you on Google Maps."
@@ -408,3 +408,23 @@ def test_verbose_mode_silences_network_library_debug_logs():
         assert logging.getLogger("httpcore.http11").getEffectiveLevel() >= logging.WARNING
     finally:
         logging.getLogger().setLevel(logging.WARNING)
+
+
+# --- calls CallRail no longer has: retired, not junk, not failed ---------------------------------
+
+
+def test_unavailable_recording_is_retired_without_touching_ai_cells_or_state(tmp_path):
+    gone = {"r1": RecordingUnavailable("This call is no longer available.")}
+    d = deps(tmp_path, [call(1), call(2)], fetcher=FakeFetcher(errors=gone))
+    summary = run_batch(CFG, d)
+    assert d.webhook.updates[0] == ("c1", {"mark_processed": True}), "stamped processed, no N/A written"
+    assert [u[0] for u in d.webhook.updates] == ["c1", "c2"], "other rows still enrich"
+    assert summary.unavailable == 1 and summary.not_conversation == 0 and summary.skipped == 0
+    assert not d.state.is_parked(call(1)) and d.state._data == {}, "never counted as a failure"
+
+
+def test_unavailable_recording_dry_run_writes_nothing(tmp_path):
+    gone = {"r1": RecordingUnavailable("gone")}
+    d = deps(tmp_path, [call(1)], fetcher=FakeFetcher(errors=gone))
+    summary = run_batch(CFG, d, dry_run=True)
+    assert d.webhook.updates == [] and summary.results == [("c1", {"mark_processed": True})]

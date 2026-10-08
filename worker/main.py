@@ -32,6 +32,7 @@ from webhook import (
     AudioFetcher,
     FetchError,
     PendingCall,
+    RecordingUnavailable,
     WebhookClient,
     WebhookFatal,
     WebhookRejected,
@@ -205,13 +206,14 @@ class Summary:
     updated: int = 0
     skipped: int = 0
     not_conversation: int = 0  # unanswered, dropped or automated: recorded as N/A, no LLM used
+    unavailable: int = 0  # CallRail no longer has the call: row retired, AI cells left blank
     stopped_early: str | None = None
     results: list[tuple[str, dict]] = field(default_factory=list)  # (call_id, fields) in dry-run
 
     def line(self) -> str:
         extra = f", stopped early: {self.stopped_early}" if self.stopped_early else ""
         return (f"pending={self.pending} parked={self.parked} updated={self.updated} "
-                f"not_conversation={self.not_conversation} skipped={self.skipped}{extra}")
+                f"not_conversation={self.not_conversation} unavailable={self.unavailable} skipped={self.skipped}{extra}")
 
 
 def run_batch(cfg: Config, deps: Deps, *, dry_run: bool = False) -> Summary:
@@ -296,6 +298,15 @@ def run_batch(cfg: Config, deps: Deps, *, dry_run: bool = False) -> Summary:
                         audio = deps.fetcher.fetch(call.call_recording_url, tmp_dir, stem=deps.state.key(call))
                         text = transcriber.transcribe(audio)
                         audio.unlink(missing_ok=True)
+                    except RecordingUnavailable as exc:
+                        # Not junk and not a failure: the call is gone from CallRail. Stamp the row
+                        # processed so it stops coming back, and leave every AI cell blank.
+                        log.warning("Recording unavailable for %s (%s): retiring the row, AI cells left blank",
+                                    call.call_id, exc)
+                        summary.unavailable += 1
+                        if not push(call, {"mark_processed": True}):
+                            return summary
+                        continue
                     except FetchError as exc:
                         fail(call, f"audio download failed: {exc}")
                         continue
