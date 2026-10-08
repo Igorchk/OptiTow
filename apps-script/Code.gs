@@ -366,6 +366,8 @@ function handleCallRail_(body) {
   const call = normalizeCallRail_(body);
   if (!call.phoneKey) warnings.push('No usable customer phone in webhook; created a standalone row.');
   if (!Object.keys(call.fields).length) throw new ApiError('BAD_REQUEST', 'Webhook carried no CallRail data.');
+  // An absent keyword is expected for many sources; just record what arrived so gaps can be audited.
+  console.log('CallRail webhook ' + JSON.stringify(call.diagnostics));
 
   return withLock_(function () {
     const log = getCallLog_();
@@ -430,8 +432,8 @@ function normalizeCallRail_(body) {
   const time = parseDate_(pick('start_time', 'created_at', 'datetime')) || new Date();
 
   const fields = {};
-  const keyword = pick('keywords', 'utm_term', 'search_keywords');
-  if (keyword !== '') fields.Search_Keyword = Array.isArray(keyword) ? keyword.join(', ') : keyword;
+  const keyword = extractKeyword_(c);
+  if (keyword.value !== '') fields.Search_Keyword = keyword.value;
   const campaign = pick('campaign', 'utm_campaign');
   if (campaign !== '') fields.Campaign_Name = campaign;
   const duration = toNumber_(pick('duration'));
@@ -445,8 +447,43 @@ function normalizeCallRail_(body) {
     time: time,
     fields: fields,
     // Kept apart from `fields`: it is attribution, not call data, and is only filled if blank.
-    leadSource: mapLeadSource_(pick('source', 'source_name'), pick('medium', 'utm_medium')),
+    // Only `source` is the marketing source; CallRail's `source_name` is the tracking number's
+    // label, so it must not feed attribution.
+    leadSource: mapLeadSource_(pick('source'), pick('medium', 'utm_medium')),
+    // What arrived, for the Executions log. Names and low-cardinality attribution only: no phone
+    // number and no keyword text.
+    diagnostics: {
+      keyword_from: keyword.key || 'none',
+      source: String(pick('source')).slice(0, 60),
+      medium: String(pick('medium', 'utm_medium')).slice(0, 60),
+      has_campaign: campaign !== '',
+      payload_keys: Object.keys(c).sort().join(','),
+    },
   };
+}
+
+// Where the paid-search keyword can live in a CallRail call. `keywords` is the documented field
+// (only populated for paid sources on Website/Session trackers); `utm_term` is the landing-page
+// parameter; `search_keywords` is an older name. `keywords_spotted` is deliberately absent: it
+// lists words detected in the call audio, not what the visitor searched for.
+const CALLRAIL_KEYWORD_KEYS = Object.freeze(['keywords', 'utm_term', 'search_keywords']);
+
+/**
+ * First usable keyword among CALLRAIL_KEYWORD_KEYS. Accepts a string or an array, and skips empty
+ * values and ad-template placeholders that were never filled in (e.g. "{keyword}", "(not set)").
+ * Returns {value: '', key: ''} when there is none, which is normal for Google My Business,
+ * Performance Max, organic and direct calls.
+ */
+function extractKeyword_(c) {
+  for (let i = 0; i < CALLRAIL_KEYWORD_KEYS.length; i++) {
+    const key = CALLRAIL_KEYWORD_KEYS[i];
+    const raw = c[key];
+    const text = (Array.isArray(raw) ? raw.map(function (k) { return String(cleanValue_(k)); }).filter(Boolean).join(', ')
+      : (raw === undefined || raw === null || typeof raw === 'object') ? '' : String(raw)).trim();
+    if (text === '' || /^\{.*\}$/.test(text) || /^\(?(not set|not provided|none)\)?$/i.test(text)) continue;
+    return { value: text, key: key };
+  }
+  return { value: '', key: '' };
 }
 
 /**

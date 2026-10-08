@@ -294,6 +294,75 @@ test('ai: CallRail attribution is never overwritten by the AI', () => {
   assert.equal(rowObj(env, cr.row).Lead_Source, 'Google Ads');
 });
 
+test('callrail keyword: `keywords` wins, `utm_term` is the fallback, other fields are never used', () => {
+  const kw = (n, extra) => {
+    const env = makeContext();
+    const res = post(env, callRail({ customer_phone_number: `+1279555${String(n).padStart(4, '0')}`, ...extra }), CR_QUERY);
+    return rowObj(env, res.row).Search_Keyword;
+  };
+  assert.equal(kw(1, {}), 'emergency tow truck', 'documented `keywords` field');
+  assert.equal(kw(2, { keywords: 'flatbed near me', utm_term: 'something else' }), 'flatbed near me');
+  assert.equal(kw(3, { keywords: '', utm_term: 'tow near me' }), 'tow near me');
+  assert.equal(kw(4, { keywords: ['cheap tow', 'tow truck'] }), 'cheap tow, tow truck');
+  // `keywords_spotted` = words detected in the call audio, not what the visitor searched for.
+  assert.equal(kw(5, { keywords: '', keywords_spotted: [{ keyword: 'flat tire' }] }), '');
+});
+
+test('callrail keyword: absent, empty and unfilled-template values are stored as blank without errors', () => {
+  const env = makeContext();
+  const blank = (n, extra) => {
+    const call = callRail({ customer_phone_number: `+1279555${String(n).padStart(4, '0')}`, ...extra });
+    if ('keywords' in extra === false) delete call.keywords;
+    const res = post(env, call, CR_QUERY);
+    assert.equal(res.ok, true, JSON.stringify(extra));
+    assert.equal(rowObj(env, res.row).Search_Keyword, '', JSON.stringify(extra));
+  };
+  blank(1, {});                                   // GMB / Performance Max / organic: no keyword at all
+  blank(2, { keywords: '' });
+  blank(3, { keywords: null });
+  blank(4, { keywords: [] });
+  blank(5, { keywords: '', utm_term: '{keyword}' });      // ValueTrack placeholder never filled in
+  blank(6, { keywords: '', utm_term: '(not set)' });
+  blank(7, { keywords: '   ' });
+});
+
+test('callrail keyword: a later webhook without a keyword never erases an existing one', () => {
+  const env = makeContext();
+  post(env, callRail(), CR_QUERY);
+  const again = post(env, callRail({ keywords: '', duration: '150' }), CR_QUERY);
+  assert.equal(again.action, 'updated');
+  const r = rowObj(env, again.row);
+  assert.equal(r.Search_Keyword, 'emergency tow truck');
+  assert.equal(r.Call_Duration_Sec, 150);
+});
+
+test('callrail webhooks log what arrived (keys and attribution, never phone or keyword text)', () => {
+  const env = makeContext();
+  const logs = [];
+  env.ctx.console.log = (m) => logs.push(String(m));
+  post(env, callRail({ source: 'Google My Business', medium: 'organic', keywords: undefined }), CR_QUERY);
+  post(env, callRail({ customer_phone_number: '+12795550123', keywords: 'secret search words' }), CR_QUERY);
+  const lines = logs.filter((l) => l.startsWith('CallRail webhook '));
+  assert.equal(lines.length, 2);
+  const first = JSON.parse(lines[0].slice('CallRail webhook '.length));
+  assert.equal(first.keyword_from, 'none');
+  assert.equal(first.source, 'Google My Business');
+  assert.match(first.payload_keys, /customer_phone_number/);
+  assert.equal(JSON.parse(lines[1].slice('CallRail webhook '.length)).keyword_from, 'keywords');
+  const all = lines.join('\n');
+  assert.ok(!all.includes('secret search words'), 'keyword text is not logged');
+  assert.ok(!all.includes('916-555') && !all.includes('9165550199'), 'phone numbers are not logged');
+});
+
+test('callrail lead source ignores source_name (the tracking number label), only `source` counts', () => {
+  const env = makeContext();
+  const call = callRail();
+  delete call.source;
+  call.source_name = 'Direct Line - Main Number';
+  const res = post(env, call, CR_QUERY);
+  assert.equal(rowObj(env, res.row).Lead_Source, '', 'left blank for the AI fallback, not mapped to Repeat / Direct');
+});
+
 test('callrail retry (same recording) is idempotent', () => {
   const env = makeContext();
   post(env, appPayload());
