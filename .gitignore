@@ -17,5 +17,14 @@ worker/worker.lock
 worker/state.json
 worker/state.tmp
 worker/worker.log*
+
+# Call recordings are customer audio: never track them (the worker only ever holds them in a temp dir)
+*.mp3
+*.wav
+*.m4a
+*.ogg
+*.flac
+*.aac
+optitow-audio-*/
 __pycache__/
 .pytest_cache/

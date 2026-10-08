@@ -294,10 +294,10 @@ def run_batch(cfg: Config, deps: Deps, *, dry_run: bool = False) -> Summary:
             tmp_dir = Path(tmp)
             with deps.transcriber() as transcriber:
                 for call in todo:
+                    audio: Path | None = None
                     try:
                         audio = deps.fetcher.fetch(call.call_recording_url, tmp_dir, stem=deps.state.key(call))
                         text = transcriber.transcribe(audio)
-                        audio.unlink(missing_ok=True)
                     except RecordingUnavailable as exc:
                         # Not junk and not a failure: the call is gone from CallRail. Stamp the row
                         # processed so it stops coming back, and leave every AI cell blank.
@@ -313,6 +313,10 @@ def run_batch(cfg: Config, deps: Deps, *, dry_run: bool = False) -> Summary:
                     except Exception as exc:  # a corrupt file must not take down the batch
                         fail(call, f"transcription failed: {type(exc).__name__}: {exc}")
                         continue
+                    finally:
+                        # The recording is deleted the moment it is no longer needed, success or not.
+                        if audio is not None:
+                            audio.unlink(missing_ok=True)
                     verdict = classify_transcript(text)
                     if verdict:
                         log.info("No conversation for %s: %s", call.call_id, verdict)

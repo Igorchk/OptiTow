@@ -428,3 +428,19 @@ def test_unavailable_recording_dry_run_writes_nothing(tmp_path):
     d = deps(tmp_path, [call(1)], fetcher=FakeFetcher(errors=gone))
     summary = run_batch(CFG, d, dry_run=True)
     assert d.webhook.updates == [] and summary.results == [("c1", {"mark_processed": True})]
+
+
+def test_audio_is_deleted_right_after_each_row_even_when_transcription_crashes(tmp_path):
+    seen, leftover_at_next_row = [], []
+
+    class Watching(FakeTranscriber):
+        def transcribe(self, path):
+            leftover_at_next_row.extend(p for p in seen if p.exists())  # checked while the batch is still running
+            seen.append(path)
+            if path.stem == FailureState.key(call(1)):
+                raise RuntimeError("ffmpeg failed")
+            return LONG
+
+    d = deps(tmp_path, [call(1), call(2)], transcriber=Watching())
+    run_batch(CFG, d)
+    assert len(seen) == 2 and leftover_at_next_row == [], "a crashed row's recording is gone before the next row starts"
