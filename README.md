@@ -25,7 +25,7 @@ On a fresh Mac or a fresh clone, just run:
 
 It will:
 1. Install or verify `ffmpeg` with Homebrew.
-2. Ask for your `WEBHOOK_URL`, `API_SECRET` and `CALLRAIL_API_KEY`.
+2. Ask for your `WEBHOOK_URL`, `API_SECRET`, `CALLRAIL_API_KEY` and `CALLRAIL_ACCOUNT_ID`.
 3. Write `ios/OptiTow/Config/Secrets.plist` and `worker/.env` (both git-ignored, owner-only).
 4. Create `worker/.venv`, upgrade pip and install `worker/requirements.txt`.
 5. Ask whether to pre-download the MLX model weights (about 6 GB) and whether to install the cron job that runs the worker every 10 minutes.

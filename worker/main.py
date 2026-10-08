@@ -54,6 +54,21 @@ class FatalError(Exception):
     pass
 
 
+def summarize_error(message: str, limit: int = 300) -> str:
+    """One line that keeps the start (what failed) and the end (why it failed).
+
+    Tools such as ffmpeg print a long version banner first and the actual cause last, so cutting
+    from the front would keep exactly the useless part.
+    """
+    lines = [line.strip() for line in message.splitlines() if line.strip()]
+    text = " | ".join(lines)
+    if len(text) <= limit:
+        return text
+    head = lines[0][:80] if lines else ""
+    tail_room = limit - len(head) - len(" … ")
+    return f"{head} … {text[-tail_room:]}"
+
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -67,12 +82,17 @@ class Config:
     whisper_model: str = DEFAULT_WHISPER_MODEL
     llm_model: str = DEFAULT_LLM_MODEL
     batch_limit: int = 50
+    # Needed to fetch recordings through CallRail's API. Lives only in worker/.env, never in code.
+    callrail_account_id: str = ""
 
 
 def load_config(env: Mapping[str, str]) -> Config:
-    missing = [k for k in ("CALLRAIL_API_KEY", "WEBHOOK_URL", "API_SECRET") if not env.get(k, "").strip()]
+    required = ("CALLRAIL_API_KEY", "CALLRAIL_ACCOUNT_ID", "WEBHOOK_URL", "API_SECRET")
+    missing = [k for k in required if not env.get(k, "").strip()]
     if missing:
-        raise FatalError(f"Missing {', '.join(missing)}. Copy .env.example to .env and fill it in.")
+        raise FatalError(f"Missing {', '.join(missing)}. Add it to worker/.env (see .env.example) or re-run ./setup.sh.")
+    if not env["CALLRAIL_ACCOUNT_ID"].strip().isdigit():
+        raise FatalError("CALLRAIL_ACCOUNT_ID must be the numeric CallRail account id (digits only).")
     url = env["WEBHOOK_URL"].strip()
     parts = urlsplit(url)
     local_http = parts.scheme == "http" and parts.hostname in ("localhost", "127.0.0.1")
@@ -84,6 +104,7 @@ def load_config(env: Mapping[str, str]) -> Config:
         raise FatalError("BATCH_LIMIT must be an integer.") from None
     return Config(
         callrail_api_key=env["CALLRAIL_API_KEY"].strip(),
+        callrail_account_id=env["CALLRAIL_ACCOUNT_ID"].strip(),
         webhook_url=url,
         api_secret=env["API_SECRET"].strip(),
         whisper_model=env.get("WHISPER_MODEL", "").strip() or DEFAULT_WHISPER_MODEL,
@@ -134,7 +155,7 @@ class FailureState:
 
     def record_failure(self, call: PendingCall, reason: str) -> int:
         entry = self._data.setdefault(self.key(call), {"failures": 0})
-        entry.update(failures=entry["failures"] + 1, last_error=reason[:300], last_at=_now())
+        entry.update(failures=entry["failures"] + 1, last_error=summarize_error(reason), last_at=_now())
         entry["call_id"] = call.call_id
         self._save()
         return entry["failures"]
@@ -216,6 +237,7 @@ def run_batch(cfg: Config, deps: Deps, *, dry_run: bool = False) -> Summary:
 
     def fail(call: PendingCall, reason: str) -> None:
         summary.skipped += 1
+        reason = summarize_error(reason)
         count = deps.state.record_failure(call, reason)
         log.warning("Skipping %s (failure %d/%d): %s", call.call_id, count, MAX_FAILURES, reason)
 
@@ -322,7 +344,11 @@ def build_deps(cfg: Config) -> Deps:
 
     return Deps(
         webhook=WebhookClient(cfg.webhook_url, cfg.api_secret),
-        fetcher=AudioFetcher(cfg.callrail_api_key, httpx.Client(timeout=120, follow_redirects=False)),
+        fetcher=AudioFetcher(
+            cfg.callrail_api_key,
+            httpx.Client(timeout=120, follow_redirects=False),
+            account_id=cfg.callrail_account_id,
+        ),
         state=FailureState(STATE_PATH),
         transcriber=lambda: WhisperTranscriber(cfg.whisper_model),
         enricher=lambda: _LlmEnricherContext(MlxLlm(cfg.llm_model)),
@@ -342,6 +368,23 @@ class _LlmEnricherContext:
         self._llm.__exit__(*exc)
 
 
+# Libraries whose debug output is transport noise (headers, cookies, connection details).
+_NOISY_LOGGERS = ("httpx", "httpcore", "hpack", "urllib3", "huggingface_hub", "filelock", "fsspec")
+
+
+def configure_logging(verbose: bool) -> None:
+    """-v shows this worker's own debug messages, not the network libraries' (which log headers)."""
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stderr,
+    )
+    # basicConfig is a no-op if logging was already set up, so apply the level explicitly too.
+    logging.getLogger().setLevel(logging.DEBUG if verbose else logging.INFO)
+    for name in _NOISY_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--limit", type=int, help="max recordings this run (overrides BATCH_LIMIT)")
@@ -349,12 +392,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        stream=sys.stderr,
-    )
-    logging.getLogger("httpx").setLevel(logging.WARNING)  # httpx logs full URLs at INFO
+    configure_logging(args.verbose)
 
     try:
         from dotenv import load_dotenv

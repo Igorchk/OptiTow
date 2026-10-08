@@ -181,3 +181,50 @@ def test_a_nine_second_call_is_closed_at_ingestion_from_its_duration_alone(serve
     callrail(server, 6, duration="9")
     row = rows(server)["https://media.example.com/rec6.mp3"]
     assert (row["Caller_Tone"], row["Mentioned_Damage"]) == ("N/A", "N/A")
+
+
+# --- the real fetcher against a faked CallRail ------------------------------------------------------
+
+FAKE_ACCOUNT = "123456789"  # obviously fake; the real account id lives only in worker/.env
+APP_LINK = "https://app.callrail.com/calls/CAL0000000000000000000000000000AA/recording/redirect?access_key=k"
+MP3 = b"ID3\x03\x00\x00\x00\x00\x00\x15" + b"\x00" * 60
+
+
+def deps_with_callrail(base, tmp_path, handler):
+    deps = make_deps(base, tmp_path)
+    deps.fetcher = AudioFetcher("cr-key", httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False),
+                                account_id=FAKE_ACCOUNT)
+    return deps
+
+
+def test_app_link_in_the_sheet_is_downloaded_through_the_documented_api_endpoint(server, tmp_path):
+    callrail(server, 7, recording=APP_LINK, source="Google Ads")
+    requested = []
+
+    def handler(request):
+        requested.append((request.url.host, request.url.path, request.headers.get("authorization")))
+        if request.url.host == "api.callrail.com":
+            return httpx.Response(302, headers={"location": "https://bucket.s3.amazonaws.com/a.mp3"})
+        return httpx.Response(200, content=MP3, headers={"content-type": "audio/mpeg"})
+
+    summary = run_batch(CFG, deps_with_callrail(server, tmp_path, handler))
+    assert (summary.updated, summary.skipped) == (1, 0)
+    assert requested == [
+        ("api.callrail.com", f"/v3/a/{FAKE_ACCOUNT}/calls/CAL0000000000000000000000000000AA/recording.json",
+         "Token token=cr-key"),
+        ("bucket.s3.amazonaws.com", "/a.mp3", None),
+    ]
+    assert rows(server)[APP_LINK]["Caller_Tone"] == "Stressed"
+
+
+def test_a_placeholder_page_instead_of_audio_is_rejected_with_a_readable_reason(server, tmp_path):
+    callrail(server, 8, recording=APP_LINK)
+    handler = lambda request: httpx.Response(200, content=b"Recording unavailable", headers={"content-type": "text/plain"})  # noqa: E731
+
+    summary = run_batch(CFG, deps_with_callrail(server, tmp_path, handler))
+    assert (summary.skipped, summary.updated) == (1, 0)
+    entry = next(iter(json.loads((tmp_path / "state.json").read_text()).values()))
+    assert "not audio" in entry["last_error"] and "text/plain" in entry["last_error"]
+    assert "ffmpeg" not in entry["last_error"], "never reached the decoder"
+    assert FAKE_ACCOUNT not in entry["last_error"]
+    assert rows(server)[APP_LINK]["Caller_Tone"] == "", "nothing was guessed or written"
