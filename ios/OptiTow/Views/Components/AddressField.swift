@@ -12,11 +12,9 @@ struct AddressField: View {
     @Binding var text: String
     @Binding var entry: AddressEntry
 
-    @Environment(\.scrollFormTo) private var scrollFormTo
     @State private var search = AddressSearch()
     @State private var isFocused = false
     @State private var listDismissed = false
-    @State private var focusScroll: Task<Void, Never>?
 
     private var trimmed: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
 
@@ -35,11 +33,8 @@ struct AddressField: View {
             }
             status
         }
-        .id(label)
-        // A short fade for the list and the status line. Layout changes land at once: a spring on
-        // every open and close moves the content under a scroll view that is being typed into.
-        .animation(.easeOut(duration: 0.12), value: showsList)
-        .animation(.easeOut(duration: 0.12), value: entry)
+        // No animation modifiers and no scrolling here: the scroll view owns keyboard avoidance, and
+        // anything that animates this container or moves the offset fights it on every keystroke.
         .onChange(of: text) { _, new in textChanged(new) }
     }
 
@@ -61,20 +56,9 @@ struct AddressField: View {
 
     // MARK: Events
 
-    /// The only place the form is scrolled for this field: once, when it gains focus. Typing,
-    /// deleting and new results never move the scroll position.
     private func focusChanged(_ focused: Bool) {
         isFocused = focused
-        focusScroll?.cancel()
-        guard focused else { return }
-        if entry == .unset { search.update(query: text) }
-        let textAtFocus = text
-        focusScroll = Task {
-            // Let the keyboard finish rising. If typing has already begun, leave the view alone.
-            try? await Task.sleep(for: .milliseconds(350))
-            guard !Task.isCancelled, text == textAtFocus else { return }
-            scrollFormTo(label)
-        }
+        if focused, entry == .unset { search.update(query: text) }
     }
 
     private func textChanged(_ new: String) {
@@ -87,24 +71,26 @@ struct AddressField: View {
         search.update(query: new)
     }
 
+    /// Confirms the address and closes the list with one short fade. The keyboard stays up and the
+    /// field keeps focus, so the screen does not re-flow around a keyboard coming and going.
     private func select(_ suggestion: AddressSuggestion) {
         Task {
             guard let place = await search.resolve(suggestion) else { return }
-            text = place.address
-            entry = .resolved(place)
-            finish()
+            withAnimation(.easeOut(duration: 0.15)) {
+                text = place.address
+                entry = .resolved(place)
+                listDismissed = true
+            }
+            search.clear()
         }
     }
 
     private func useAsTyped() {
-        entry = .manual(text)
-        finish()
-    }
-
-    private func finish() {
-        listDismissed = true
+        withAnimation(.easeOut(duration: 0.15)) {
+            entry = .manual(text)
+            listDismissed = true
+        }
         search.clear()
-        dismissKeyboard()
     }
 }
 

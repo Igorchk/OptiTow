@@ -3,8 +3,6 @@ import SwiftUI
 /// The single screen: capture one call, save it to the offline queue, start the next.
 struct DispatchFormView: View {
     @Environment(SyncManager.self) private var sync
-    @Environment(\.dynamicTypeSize) private var typeSize
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var draft = CallDraft()
     @State private var savedCount = 0
@@ -13,6 +11,9 @@ struct DispatchFormView: View {
     @State private var showSyncDetail = false
     @State private var confirmClear = false
     @State private var trip = TripMileageModel()
+    @State private var showQuickMileage = false
+    /// Bumped after a save; the scroll view returns to the top for the next call.
+    @State private var scrollTopTick = 0
 
     private let catalog = VehicleCatalog.shared
 
@@ -47,11 +48,9 @@ struct DispatchFormView: View {
                 }
                 .scrollDismissesKeyboard(.interactively)
                 .background(Theme.background)
-                .environment(\.scrollFormTo, FormScroller { id in
-                    // One plain ease, none at all with Reduce Motion: a spring overshoots next to a keyboard.
-                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) { proxy.scrollTo(id, anchor: .top) }
-                })
-                .safeAreaInset(edge: .bottom) { saveBar(proxy: proxy) }
+                .onChange(of: scrollTopTick) {
+                    withAnimation { proxy.scrollTo("top", anchor: .top) }
+                }
             }
             .navigationTitle("New Call")
             #if os(iOS)
@@ -63,6 +62,9 @@ struct DispatchFormView: View {
         .sensoryFeedback(.success, trigger: savedCount)
         .sheet(isPresented: $showSyncDetail) {
             SyncStatusSheet(sync: sync, isConfigured: Self.isConfigured)
+        }
+        .sheet(isPresented: $showQuickMileage) {
+            MileageCalculatorView()
         }
         .alert("Couldn't save call", isPresented: Binding(get: { saveError != nil }, set: { if !$0 { saveError = nil } })) {
             Button("OK", role: .cancel) {}
@@ -179,17 +181,29 @@ struct DispatchFormView: View {
         }
     }
 
+    /// The Outcome card, and under it the Save button. The button does not exist until the call can
+    /// be saved (a 10-digit phone and an outcome), so there is never a disabled button to puzzle over.
     private var outcomeSection: some View {
-        FormSection(title: "Outcome") {
-            OutcomeToggle(outcome: $draft.outcome)
-            if draft.isLost {
-                FieldGroup(label: "Why did they decline?") {
-                    ChipGrid(options: ChipOptions.declineReason, selection: $draft.decline_reason)
+        VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
+            FormSection(title: "Outcome") {
+                OutcomeToggle(outcome: $draft.outcome)
+                if draft.isLost {
+                    FieldGroup(label: "Why did they decline?") {
+                        ChipGrid(options: ChipOptions.declineReason, selection: $draft.decline_reason)
+                    }
+                    .transition(.opacity.combined(with: .move(edge: .top)))
                 }
-                .transition(.opacity.combined(with: .move(edge: .top)))
             }
+            .themeAnimation(value: draft.isLost)
+
+            Group {
+                if draft.canSave {
+                    ActionPillButton("Save Call", action: save)
+                        .transition(.opacity)
+                }
+            }
+            .animation(.easeOut(duration: 0.15), value: draft.canSave)
         }
-        .themeAnimation(value: draft.isLost)
     }
 
     private var notesSection: some View {
@@ -200,33 +214,16 @@ struct DispatchFormView: View {
 
     // MARK: - Chrome
 
-    /// The Save action, pinned over a blurred bar. Its label says what is still missing.
-    private func saveBar(proxy: ScrollViewProxy) -> some View {
-        ActionPillButton(saveLabel) {
-            save(proxy: proxy)
-        }
-        .disabled(!draft.canSave)
-        .padding(.horizontal, Theme.Spacing.md)
-        .padding(.vertical, Theme.Spacing.sm)
-        .background(.thinMaterial)
-        .overlay(alignment: .top) { Theme.hairline.frame(height: 1) }
-        // The bar is pinned over the form, so at the largest sizes it must not take over the screen.
-        .dynamicTypeSize(...DynamicTypeSize.accessibility2)
-    }
-
-    /// Says what is still missing; the phone comes first because it is the first field on the form.
-    /// Shorter at accessibility text sizes, where the full wording would wrap over several lines.
-    private var saveLabel: String {
-        let compact = typeSize.isAccessibilitySize
-        if !draft.hasValidPhone { return compact ? "Add phone" : "Enter a 10-digit phone to save" }
-        if draft.outcome.isEmpty { return compact ? "Pick Won or Lost" : "Pick Won or Lost to save" }
-        return "Save Call"
-    }
-
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItem(placement: .cancellationAction) {
+        ToolbarItemGroup(placement: .cancellationAction) {
             Button("Clear") { confirmClear = true }
+            Button { showQuickMileage = true } label: {
+                Image(systemName: "map")
+                    .frame(minWidth: 44, minHeight: 44)
+            }
+            .accessibilityLabel("Quick mileage")
+            .accessibilityHint("Opens a standalone mileage calculator. The current call is not changed.")
         }
         ToolbarItem(placement: .primaryAction) {
             let state = syncState
@@ -265,7 +262,7 @@ struct DispatchFormView: View {
 
     // MARK: - Actions
 
-    private func save(proxy: ScrollViewProxy) {
+    private func save() {
         guard draft.canSave else { return }
         do {
             try sync.save(draft)
@@ -276,7 +273,7 @@ struct DispatchFormView: View {
         dismissKeyboard()
         draft = CallDraft()
         savedCount += 1
-        withAnimation { proxy.scrollTo("top", anchor: .top) }
+        scrollTopTick += 1
         withAnimation(Theme.spring) { showSavedBanner = true }
         Task {
             try? await Task.sleep(for: .seconds(1.6))

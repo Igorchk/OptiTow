@@ -93,7 +93,7 @@ struct TripMileageCard: View {
                 ActionPillButton("Try again", kind: .secondary, fillsWidth: false, action: onRetry)
             }
         } else if case .result = state {
-            Text("Estimate from Apple Maps driving directions. The sheet records its own mileage.").metadata()
+            Text("Estimate from Apple Maps driving directions. The spreadsheet records its own mileage.").metadata()
         }
     }
 
