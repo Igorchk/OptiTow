@@ -7,6 +7,12 @@
  *   ?source=website        Website form submission       token in body/query  (WEBSITE_SECRET)
  *   ?source=callrail       CallRail post-call webhook    token in query       (API_SECRET)
  *   ?source=ai             Mac Mini AI worker            token in JSON body   (API_SECRET)
+ *   ?source=location       Customer location sharing     request_location / check_location use
+ *                          (app) and a public landing    the API_SECRET; submit_location (from
+ *                          page (customer's phone)       the landing page) is public but only
+ *                                                        accepted for a token the app registered
+ *
+ * `doGet` answers a health check, or, with `?loc=<token>`, serves the customer's landing page.
  *
  * Apps Script cannot read request headers or set HTTP status codes, so auth is a
  * pre-shared token in the payload/query and every response is HTTP 200 with a JSON
@@ -35,7 +41,13 @@ const CONFIG = Object.freeze({
   // Keep equal to MIN_LIVE_CALL_SEC in worker/guards.py (a contract test enforces it).
   MIN_LIVE_CALL_SEC: 15,
   ROW_GROWTH: 500,
+  // How long a customer's shared location stays readable (and how long a link stays valid).
+  LOCATION_TTL_SECONDS: 15 * 60,
 });
+
+// Location-sharing link tokens: lowercase letters and digits only, so one can be placed in a URL
+// or in page code without escaping.
+const LOCATION_TOKEN_RE = /^[a-z0-9]{8,32}$/;
 
 // 29 columns. Columns 1-21 are the dispatcher block (app/website writes, plus the computed miles);
 // 22-29 are automated ingestion (CallRail, then the AI worker), so a dispatcher write can never
@@ -118,7 +130,9 @@ class ApiError extends Error {
 function doPost(e) {
   try {
     const request = parseRequest_(e);
-    authorize_(request.source, request.token);
+    // The customer's phone has no secret. Its one call is accepted only for a link token the app
+    // registered with an authenticated request, and can do nothing but store a location for it.
+    if (!isPublicLocationSubmit_(request)) authorize_(request.source, request.token);
 
     let result;
     switch (request.source) {
@@ -134,6 +148,9 @@ function doPost(e) {
       case 'ai':
         result = handleAi_(request.body);
         break;
+      case 'location':
+        result = handleLocation_(request.body);
+        break;
       default:
         throw new ApiError('BAD_REQUEST', 'Unknown source "' + request.source + '".');
     }
@@ -147,10 +164,194 @@ function doPost(e) {
   }
 }
 
-/** Unauthenticated health check so a deployment can be verified from a browser. */
-function doGet() {
+/**
+ * Unauthenticated: a health check so a deployment can be verified from a browser, or, with
+ * `?loc=<token>`, the page a customer opens from a text message to share their location.
+ */
+function doGet(e) {
+  const params = (e && e.parameter) || {};
+  if (params.loc !== undefined) return locationPage_(String(params.loc));
   return json_({ ok: true, service: 'optitow-middleware' });
 }
+
+// ---------------------------------------------------------------------------
+// Customer location sharing
+//
+// Flow: the app picks a random link token and registers it (request_location). It texts the
+// customer a link to this web app (?loc=<token>). The customer's phone shows a page, asks the
+// browser for its position and sends it back (submit_location). The app polls (check_location)
+// until the position arrives. Everything lives in the script cache for LOCATION_TTL_SECONDS, so
+// nothing about the customer is written to the sheet or kept afterwards.
+// ---------------------------------------------------------------------------
+
+function isPublicLocationSubmit_(request) {
+  return request.source === 'location' && request.body && request.body.action === 'submit_location';
+}
+
+function locationKey_(token) {
+  return 'loc_' + token;
+}
+
+function requireLocationToken_(body) {
+  const token = body.loc == null ? '' : String(body.loc).trim();
+  if (!LOCATION_TOKEN_RE.test(token)) {
+    throw new ApiError('BAD_REQUEST', 'loc must be 8-32 lowercase letters or digits.');
+  }
+  return token;
+}
+
+function handleLocation_(body) {
+  switch (body.action) {
+    case 'request_location':
+      return requestLocation_(body);
+    case 'check_location':
+      return checkLocation_(body);
+    case 'submit_location':
+      return submitLocation_(body);
+    default:
+      throw new ApiError('BAD_REQUEST', 'Unknown location action "' + body.action + '".');
+  }
+}
+
+/** App: register a link token so the customer's page has something to answer. */
+function requestLocation_(body) {
+  const token = requireLocationToken_(body);
+  CacheService.getScriptCache().put(
+    locationKey_(token), JSON.stringify({ status: 'pending' }), CONFIG.LOCATION_TTL_SECONDS);
+  return { status: 'pending' };
+}
+
+/** App: has the customer shared yet? An unknown or expired token reads as pending. */
+function checkLocation_(body) {
+  const token = requireLocationToken_(body);
+  const entry = readLocation_(token);
+  if (!entry || entry.status !== 'ready') return { status: 'pending' };
+  return { status: 'ready', address: entry.address, lat: entry.lat, lng: entry.lng };
+}
+
+/** Customer: store the position for a registered token. The first position wins. */
+function submitLocation_(body) {
+  const token = requireLocationToken_(body);
+  const lat = parseCoordinate_(body.lat, 90, 'lat');
+  const lng = parseCoordinate_(body.lng, 180, 'lng');
+
+  const entry = readLocation_(token);
+  if (!entry) {
+    throw new ApiError('NOT_FOUND', 'This link has expired. Ask the dispatcher for a new one.');
+  }
+  if (entry.status === 'ready') return { already: true };
+
+  CacheService.getScriptCache().put(
+    locationKey_(token),
+    JSON.stringify({ status: 'ready', address: reverseGeocode_(lat, lng), lat: lat, lng: lng }),
+    CONFIG.LOCATION_TTL_SECONDS);
+  // Deliberately returns nothing about the position: this endpoint is public.
+  return {};
+}
+
+function readLocation_(token) {
+  const raw = CacheService.getScriptCache().get(locationKey_(token));
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch (_) {
+    return null;
+  }
+}
+
+function parseCoordinate_(value, limit, name) {
+  const text = value == null ? '' : String(value).trim();
+  const n = text === '' ? NaN : Number(text);
+  if (!isFinite(n) || Math.abs(n) > limit) {
+    throw new ApiError('BAD_REQUEST', name + ' must be a number between -' + limit + ' and ' + limit + '.');
+  }
+  return n;
+}
+
+/** A street address for the position, or '' if Maps has none (the app then shows the coordinates). */
+function reverseGeocode_(lat, lng) {
+  try {
+    const reply = Maps.newGeocoder().reverseGeocode(lat, lng);
+    const first = reply && reply.status === 'OK' && reply.results && reply.results[0];
+    return first && first.formatted_address ? String(first.formatted_address).replace(/,\s*USA$/, '') : '';
+  } catch (err) {
+    console.warn('Reverse geocode failed: ' + err);
+    return '';
+  }
+}
+
+/** Embeds a value in page script: JSON, with anything that could end the script block escaped. */
+function jsLiteral_(value) {
+  return JSON.stringify(value).replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/&/g, '\\u0026');
+}
+
+function locationPage_(token) {
+  const valid = LOCATION_TOKEN_RE.test(token);
+  const html = valid
+    ? LOCATION_PAGE_HTML.replace('__CONFIG__', jsLiteral_({
+        token: token,
+        endpoint: ScriptApp.getService().getUrl(),
+      }))
+    : LOCATION_INVALID_HTML;
+  return HtmlService.createHtmlOutput(html)
+    .setTitle('Recovery Towing')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+}
+
+const LOCATION_INVALID_HTML =
+  '<!doctype html><meta charset="utf-8"><body style="font-family:-apple-system,sans-serif;padding:32px;text-align:center">' +
+  '<h2>Recovery Towing</h2><p>This link is not valid. Please ask your dispatcher to send a new one.</p></body>';
+
+const LOCATION_PAGE_HTML = [
+  '<!doctype html><html lang="en"><head><meta charset="utf-8">',
+  '<meta name="viewport" content="width=device-width, initial-scale=1">',
+  '<title>Recovery Towing</title>',
+  '<style>',
+  ':root{color-scheme:light dark;--bg:#e8eaee;--card:#fff;--text:#111;--sub:#555;--btn:#ffcc00;--btn-text:#000}',
+  '@media(prefers-color-scheme:dark){:root{--bg:#000;--card:#1c1c1e;--text:#fff;--sub:#a1a1a6}}',
+  '*{box-sizing:border-box}',
+  'body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;',
+  'background:var(--bg);color:var(--text);font:17px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}',
+  '.card{width:100%;max-width:420px;background:var(--card);border-radius:20px;padding:32px 24px;text-align:center;',
+  'box-shadow:0 6px 24px rgba(0,0,0,.08)}',
+  'h1{font-size:15px;letter-spacing:.09em;text-transform:uppercase;color:var(--sub);margin:0 0 20px;font-weight:600}',
+  'p{margin:0 0 24px}',
+  '.lead{font-size:22px;font-weight:700;line-height:1.25}',
+  'button{width:100%;min-height:56px;border:0;border-radius:16px;background:var(--btn);color:var(--btn-text);',
+  'font:700 18px -apple-system,sans-serif;cursor:pointer}',
+  'button:disabled{opacity:.55}',
+  '.fine{font-size:13px;color:var(--sub);margin:16px 0 0}',
+  '.ok{color:#0a7d33}.err{color:#c0392b}',
+  '</style></head><body><main class="card" id="card">',
+  '<h1>Recovery Towing</h1>',
+  '<p class="lead" id="msg">Tap below so your driver can find your exact spot.</p>',
+  '<button id="go" type="button">Share My Exact Location</button>',
+  '<p class="fine" id="fine">Your location is used only to find you for this tow.</p>',
+  '</main><script>',
+  'var CFG = __CONFIG__;',
+  'var msg = document.getElementById("msg"), go = document.getElementById("go"), fine = document.getElementById("fine");',
+  'var FAIL = "Unable to detect location. Please tell your dispatcher your nearest cross street.";',
+  'function done(text, cls){ msg.textContent = text; msg.className = "lead " + (cls || ""); go.style.display = "none"; fine.style.display = "none"; }',
+  'function retry(text){ msg.textContent = text; msg.className = "lead err"; go.disabled = false; go.textContent = "Try Again"; }',
+  'function send(pos){',
+  '  var body = new URLSearchParams({ action: "submit_location", loc: CFG.token, lat: String(pos.coords.latitude), lng: String(pos.coords.longitude) });',
+  '  fetch(CFG.endpoint + "?source=location", { method: "POST", body: body })',
+  '    .then(function(r){ return r.json(); })',
+  '    .then(function(j){',
+  '      if (j && j.ok) done("Location received! Our driver has your exact spot.", "ok");',
+  '      else if (j && j.code === "NOT_FOUND") done("This link has expired. Please ask your dispatcher to send a new one.", "err");',
+  '      else done(FAIL, "err");',
+  '    })',
+  '    .catch(function(){ done(FAIL, "err"); });',
+  '}',
+  'go.addEventListener("click", function(){',
+  '  if (!navigator.geolocation) { done(FAIL, "err"); return; }',
+  '  go.disabled = true; go.textContent = "Finding you\u2026";',
+  '  navigator.geolocation.getCurrentPosition(send, function(){ retry(FAIL); },',
+  '    { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 });',
+  '});',
+  '</script></body></html>',
+].join('\n');
 
 // ---------------------------------------------------------------------------
 // Request parsing & auth

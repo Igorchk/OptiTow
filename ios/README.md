@@ -46,6 +46,7 @@ OptiTow/
   Models/CallDraft.swift        form state for the call on the line
   Sync/SyncManager.swift        NWPathMonitor + queue drain + retry backoff
   Sync/WebhookClient.swift      POST + response classification
+  Sync/CustomerLocationService.swift  asks a customer to share their location and polls for it
   Config/AppConfig.swift        reads Secrets.plist
   Catalog/ChipOptions.swift     exact chip strings (mirror Code.gs ENUMS)
   Catalog/VehicleCatalog.swift  make → models lookup
@@ -85,6 +86,7 @@ How each failure is handled:
 - **No history:** there are no search bars or history lists. The toolbar badge shows the sync state (all synced, syncing, offline with calls queued, retrying, failed, or setup needed). Tapping it opens a sheet that explains the state and offers **Retry Sync**.
 - **Address search and trip mileage:** Pickup and Dropoff are static rows that open an Address Search sheet with California address suggestions; tapping one confirms the address and its coordinate, and "Use as typed" keeps free text. With both confirmed, a Trip Mileage card shows the three driving legs (yard to pickup, loaded, back to the yard) and a total from Apple Maps. This is display only: nothing about it is saved or synced, and without a connection the fields stay plain text. Set a different yard with optional `YARD_ADDRESS`, `YARD_LAT` and `YARD_LON` keys in `Secrets.plist`.
 - **Start Location:** a static row like Pickup and Dropoff. A confirmed address replaces the configured yard as the route's origin and return point; empty or manual falls back to the yard.
+- **Ask for Location:** with a valid phone, a button texts the customer a link (system Messages sheet; a copy/share fallback where texting is unavailable). The app then polls the Apps Script (`?source=location`) every 3 seconds for up to 5 minutes and fills the Pickup row with the customer's shared position. Needs the updated `Code.gs` deployed (see `apps-script/README.md`).
 - **Save button:** it appears under the Outcome card only once the call can be saved (10-digit phone and an outcome). There is no pinned bottom bar.
 - **Quick Mileage:** the toolbar map button opens a standalone mileage calculator in a sheet, separate from the call in progress.
 - **Private Cash shortcut:** choosing **Private Cash** fills the payer with **Cash / Customer** if no payer is set yet.

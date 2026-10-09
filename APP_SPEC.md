@@ -51,6 +51,12 @@ The app must not show, store or POST either field.
 - **Quick Mileage:** a map button in the toolbar opens a standalone calculator (its own Pickup and Dropoff fields and Trip Mileage card) in a sheet. It shares no state with the call being filled in, and closing it discards it.
 - **Offline:** search and routing need a connection. Without one the fields behave as plain text and the card says it can't reach Maps.
 
+## 5d. Customer Location Sharing
+- **Ask for Location:** once the phone has 10 digits (and the build has a webhook configured), a secondary button with a `location.fill` icon appears under the Phone field. It registers a one-time link with the Apps Script, then opens the system Messages sheet addressed to the customer with: "Hi from Recovery Towing! Please tap this link so our driver can find your exact spot: <link>". The dispatcher taps Send. On a device that cannot text, a sheet shows the same message with Copy and Share and an "I sent it" button.
+- **Waiting:** after the text is sent (not if the sheet is cancelled), a pill under the Pickup row says "Waiting for customer location…" with an X. The app checks every 3 seconds for up to 5 minutes. It then says "No location yet. Ask again or enter the address." and can be dismissed. A failure to register the link (offline, or an out-of-date Apps Script) shows a message instead of opening Messages.
+- **Result:** when the customer shares, the Pickup row fills with the street address (or the coordinates if Maps has none) as a confirmed address with its coordinate, a success haptic plays, and the Trip Mileage card works as usual. Typing or choosing a Pickup address while waiting stops the wait, so a late answer never replaces it. Clear and Save also stop it.
+- **Privacy:** the location is held for 15 minutes in the Apps Script cache and is never written to the sheet. Only the app, with the API secret, can read it. The link is single-use in effect: the first location submitted wins.
+
 ## 6. The ML Target Variable
 - `outcome`: This must be a MASSIVE visual toggle button at the bottom: [1 - Won / Booked] or [0 - Lost / Declined].
 - `decline_reason`: ONLY show this chip grid if the Outcome is "0 - Lost". Options: [Price Too High, ETA Too Long, Already Found Help, Changed Mind].

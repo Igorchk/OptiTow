@@ -1,6 +1,6 @@
 # OptiTow Middleware (Google Apps Script)
 
-`Code.gs` is the single web-app endpoint between the iOS app, CallRail, the website form, the Mac Mini AI worker and the Google Sheet.
+`Code.gs` is the single web-app endpoint between the iOS app, CallRail, the website form, the Mac Mini AI worker and the Google Sheet. It also serves the page customers open to share their location.
 
 ## Deploy
 
@@ -129,3 +129,23 @@ Write results:
 - **Send `call_recording_url` too.** If the iOS app claims a CallRail row while the worker is processing it, that row's `call_id` changes, and the recording URL is how the update still finds it.
 
 CallRail's v3 `recording` URL is an API endpoint that needs a CallRail API key. Phase 3 will fetch audio with that key.
+
+### Customer location sharing: `?source=location` and `GET <exec-url>?loc=<token>`
+
+Lets the dispatcher text a customer a link, and fills the Pickup address from the position the customer shares. Nothing is written to the sheet: everything lives in the script cache for **15 minutes**, then disappears.
+
+1. The app picks a random 12-character link token and registers it: `POST ?source=location` with `{ "token": "<API_SECRET>", "action": "request_location", "loc": "<token>" }`.
+2. The customer opens `<exec-url>?loc=<token>` (a mobile page titled Recovery Towing). Tapping **Share My Exact Location** asks the browser for the position and posts it back: `POST ?source=location` with form fields `action=submit_location&loc=<token>&lat=<lat>&lng=<lng>`. The server reverse-geocodes it (Maps) and stores `{ status: "ready", address, lat, lng }`.
+3. The app polls `{ "token": "<API_SECRET>", "action": "check_location", "loc": "<token>" }` every 3 seconds for up to 5 minutes. The reply is `{ "ok": true, "status": "pending" }` or `{ "ok": true, "status": "ready", "address", "lat", "lng" }`. An unknown or expired token also reads as `pending`.
+
+**Why `loc`, not `token`:** `token` is the API secret in every request, so the link token has its own field.
+
+**Safeguards (the customer's page has no secret):**
+- `request_location` and `check_location` require the API secret. The website secret does not work, so a location can only be read by the app.
+- `submit_location` is the only public call. It is accepted only for a token the app registered and that has not expired (otherwise `NOT_FOUND`), so strangers cannot create cache entries or spend the Maps quota. It returns nothing about the position, and the **first** position wins.
+- Link tokens must be 8 to 32 lowercase letters or digits; coordinates must be numbers within range. The token is put in the page only after it passes that check.
+- If Maps has no street address for the spot, `address` is empty and the app shows the coordinates.
+
+**Deploying:** pasting the new `Code.gs` is not enough. Use **Deploy → Manage deployments → Edit → New version**, or the old code keeps answering (the app then says the Apps Script has not been updated for location sharing).
+
+**Check before relying on it:** the landing page runs inside Apps Script's HtmlService frame. Some browsers or in-app webviews block `navigator.geolocation` there. The page then shows "Unable to detect location. Please tell your dispatcher your nearest cross street." and offers Try Again. Send yourself a link and tap it on a real phone before using it on a customer. If a browser blocks it, the page can be hosted elsewhere and still post to this same endpoint.
