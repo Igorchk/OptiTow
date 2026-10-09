@@ -102,10 +102,10 @@ struct ActionPillButton: View {
     }
 
     private var background: Color {
-        guard isEnabled else { return Theme.control }
+        guard isEnabled else { return Theme.fillMuted }
         switch kind {
         case .primary: return Theme.selected
-        case .secondary: return Theme.control
+        case .secondary: return Theme.fillMuted
         case .destructive: return Theme.Tone.danger.tint
         }
     }

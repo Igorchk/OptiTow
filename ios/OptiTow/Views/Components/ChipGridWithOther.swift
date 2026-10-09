@@ -22,7 +22,7 @@ struct ChipGridWithOther: View {
     }
 
     var body: some View {
-        VStack(spacing: Theme.Spacing.xs) {
+        VStack(spacing: Theme.Spacing.grid) {
             ChipGrid(options: options + [Self.otherLabel], selection: chipSelection, minChipWidth: minChipWidth)
             if isOther {
                 BigTextField(label: otherPlaceholder, placeholder: otherPlaceholder, text: $value)

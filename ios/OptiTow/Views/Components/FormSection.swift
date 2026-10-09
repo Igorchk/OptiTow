@@ -1,18 +1,21 @@
 import SwiftUI
 
-/// A titled card in the dispatch form. Each section is its own surface, so the form reads as a few
-/// clear groups instead of one long wall of controls.
+/// A card in the dispatch form with a small uppercase header on the canvas above it. Each section is
+/// its own surface, so the form reads as a few clear groups instead of one long wall of controls.
 struct FormSection<Content: View>: View {
     let title: String
     @ViewBuilder let content: Content
 
     var body: some View {
-        SurfaceCard {
-            VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-                Text(title)
-                    .sectionTitle()
-                    .accessibilityAddTraits(.isHeader)
-                content
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+            Text(title)
+                .sectionHeader()
+                .padding(.horizontal, Theme.Spacing.md)
+                .accessibilityAddTraits(.isHeader)
+            SurfaceCard {
+                VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
+                    content
+                }
             }
         }
     }
@@ -24,7 +27,7 @@ struct FieldGroup<Content: View>: View {
     @ViewBuilder let content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
             Text(label).fieldLabel()
             content
         }
@@ -32,11 +35,12 @@ struct FieldGroup<Content: View>: View {
 }
 
 extension View {
-    /// The fill and outline shared by every text input. The outline turns amber when focused.
+    /// The fill and outline shared by every text input: a faint well with a fine outline that turns
+    /// amber and thicker when focused.
     func inputSurface(isFocused: Bool = false) -> some View {
         let shape = RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
         return background(Theme.control, in: shape)
-            .overlay(shape.strokeBorder(isFocused ? Theme.selectedStroke : Theme.hairline,
+            .overlay(shape.strokeBorder(isFocused ? Theme.selectedStroke : Theme.controlBorder,
                                         lineWidth: isFocused ? 2 : 1))
     }
 }

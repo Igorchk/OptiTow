@@ -31,7 +31,7 @@ struct ComponentGallery: View {
                 SurfaceCard {
                     VStack(spacing: Theme.Spacing.sm) {
                         Text("Action buttons").fieldLabel().frame(maxWidth: .infinity, alignment: .leading)
-                        ActionPillButton("Save Call", systemImage: "checkmark") {}
+                        ActionPillButton("Save Call") {}
                         ActionPillButton("Retry Sync", systemImage: "arrow.clockwise", kind: .secondary) {}
                         ActionPillButton("Discard Call", systemImage: "trash", kind: .destructive) {}
                         ActionPillButton("Enter a 10-digit phone to save") {}.disabled(true)

@@ -29,7 +29,7 @@ struct DispatchFormView: View {
                     // The scroll anchor lives outside the re-identified form so scrollTo
                     // still finds it after a save swaps the form's identity.
                     Color.clear.frame(height: 0).id("top")
-                    VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+                    VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
                         callerSection
                         jobSection
                         vehicleSection
@@ -191,7 +191,7 @@ struct DispatchFormView: View {
 
     /// The Save action, pinned over a blurred bar. Its label says what is still missing.
     private func saveBar(proxy: ScrollViewProxy) -> some View {
-        ActionPillButton(saveLabel, systemImage: draft.canSave ? "checkmark" : nil) {
+        ActionPillButton(saveLabel) {
             save(proxy: proxy)
         }
         .disabled(!draft.canSave)

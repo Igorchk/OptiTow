@@ -14,6 +14,10 @@ enum Theme {
         static let xs: CGFloat = 8
         static let sm: CGFloat = 12
         static let md: CGFloat = 16
+        /// Gap between chips: wide enough that a thumb landing between two doesn't hit the wrong one.
+        static let grid: CGFloat = 10
+        /// Padding inside a card, on all four sides.
+        static let card: CGFloat = 20
         static let lg: CGFloat = 24
         static let xl: CGFloat = 32
         static let xxl: CGFloat = 48
@@ -32,24 +36,36 @@ enum Theme {
     /// Chips and buttons are tapped one-handed during a live call: never below 52pt tall (Apple's
     /// minimum is 44pt). Scaled with Dynamic Type where it is used.
     static let controlMinHeight: CGFloat = 52
+    /// Chips are a little taller so a two-line label fits without making its row uneven.
+    static let chipMinHeight: CGFloat = 60
 
     // MARK: Surfaces
 
-    /// The screen behind everything.
-    static let background = Color(uiColor: .systemGroupedBackground)
-    /// Cards and fields sitting on the background.
+    /// The screen behind everything. A cool light gray in light mode (clearly darker than the white
+    /// cards on it) and true black in dark mode.
+    static let background = Color(light: Color(red: 0.90, green: 0.91, blue: 0.925),
+                                  dark: Color(uiColor: .systemGroupedBackground))
+    /// Cards sitting on the background: white in light mode, raised charcoal in dark.
     static let surface = Color(uiColor: .secondarySystemGroupedBackground)
-    /// A control inside a card (an unselected chip, a text field).
-    static let control = Color(uiColor: .tertiarySystemGroupedBackground)
-    /// The hairline that outlines cards and controls.
-    static let hairline = Color.primary.opacity(0.08)
-    /// Soft ambient shadow under cards. Barely there in light mode, invisible in dark.
-    static let shadow = Color.black.opacity(0.06)
+    /// A control inside a card (an unselected chip, a text field): a faint tint of the text color, so
+    /// it reads as a recessed well rather than a second gray block.
+    static let control = Color(light: Color.black.opacity(0.03), dark: Color.white.opacity(0.06))
+    /// The fine outline around an unselected chip or an empty field.
+    static let controlBorder = Color(light: Color.black.opacity(0.09), dark: Color.white.opacity(0.11))
+    /// A slightly stronger tint, for a disabled or secondary button that must still read as a button.
+    static let fillMuted = Color.primary.opacity(0.07)
+    /// The hairline that outlines cards and separates the save bar.
+    static let hairline = Color.primary.opacity(0.07)
+    /// Soft ambient shadow under cards. Visible on the light canvas, absent in dark mode.
+    static let shadow = Color.black.opacity(0.07)
 
     // MARK: Text
 
     static let textPrimary = Color(uiColor: .label)
-    static let textSecondary = Color(uiColor: .secondaryLabel)
+    /// Apple's own secondaryLabel is about 3.4:1 on white, under the 4.5:1 this app requires for small
+    /// text, so light mode uses a slightly darker gray (5.4:1 on the canvas). Dark mode keeps Apple's.
+    static let textSecondary = Color(light: Color(red: 0.36, green: 0.36, blue: 0.39),
+                                     dark: Color(uiColor: .secondaryLabel))
     static let textTertiary = Color(uiColor: .tertiaryLabel)
 
     // MARK: Accent and outcome colors
@@ -117,14 +133,19 @@ extension Color {
 // that change (phone, price, counts) use monospaced digits so they don't jitter as they update.
 
 extension View {
-    /// Section header: high contrast against the small field labels beneath it.
+    /// Header above a card: small, uppercase, widely tracked and quiet, so the controls win attention.
+    func sectionHeader() -> some View {
+        font(.footnote.weight(.semibold)).tracking(0.9).textCase(.uppercase).foregroundStyle(Theme.textSecondary)
+    }
+
+    /// Heading inside a gallery or sheet. Not used by the form's cards.
     func sectionTitle() -> some View {
         font(.title3.weight(.bold)).foregroundStyle(Theme.textPrimary)
     }
 
     /// Label above a field or chip group.
     func fieldLabel() -> some View {
-        font(.subheadline.weight(.semibold)).foregroundStyle(Theme.textSecondary)
+        font(.subheadline.weight(.medium)).foregroundStyle(Theme.textPrimary)
     }
 
     /// Small supporting text.
@@ -139,7 +160,7 @@ extension View {
 
     /// Soft ambient elevation for cards.
     func cardShadow() -> some View {
-        shadow(color: Theme.shadow, radius: 8, x: 0, y: 2)
+        shadow(color: Theme.shadow, radius: 14, x: 0, y: 4)
     }
 }
 

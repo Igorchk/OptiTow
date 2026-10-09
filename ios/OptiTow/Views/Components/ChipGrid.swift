@@ -12,8 +12,8 @@ struct ChipGrid: View {
 
     var body: some View {
         LazyVGrid(
-            columns: [GridItem(.adaptive(minimum: minChipWidth * scale), spacing: Theme.Spacing.xs)],
-            spacing: Theme.Spacing.xs
+            columns: [GridItem(.adaptive(minimum: minChipWidth * scale), spacing: Theme.Spacing.grid)],
+            spacing: Theme.Spacing.grid
         ) {
             ForEach(options, id: \.self) { option in
                 ChipButton(title: option, isSelected: selection == option) {
@@ -25,14 +25,15 @@ struct ChipGrid: View {
     }
 }
 
-/// One chip. Selected is a bold yellow fill with a darker outline and a checkmark, so it reads from
-/// arm's length and never depends on color alone. At least 52pt tall (scaled with text size).
+/// One chip. Selected is a yellow fill with a 2pt amber outline and bold type; unselected is a faint
+/// well with a fine outline and medium type. The three cues together (fill, outline, weight) keep it
+/// from relying on color alone, with no icon inside the pill. At least 60pt tall (scaled with text size).
 struct ChipButton: View {
     let title: String
     let isSelected: Bool
     let action: () -> Void
 
-    @ScaledMetric(relativeTo: .headline) private var minHeight = Theme.controlMinHeight
+    @ScaledMetric(relativeTo: .headline) private var minHeight = Theme.chipMinHeight
 
     private var shape: RoundedRectangle {
         RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
@@ -41,7 +42,7 @@ struct ChipButton: View {
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(.headline)
+                .font(.headline.weight(isSelected ? .bold : .medium))
                 .multilineTextAlignment(.center)
                 .foregroundStyle(isSelected ? Theme.onFill : Theme.textPrimary)
                 .padding(.horizontal, Theme.Spacing.sm)
@@ -49,19 +50,9 @@ struct ChipButton: View {
                 .frame(maxWidth: .infinity, minHeight: minHeight)
                 .background(isSelected ? Theme.selected : Theme.control, in: shape)
                 .overlay(
-                    shape.strokeBorder(isSelected ? Theme.selectedStroke : Theme.hairline,
+                    shape.strokeBorder(isSelected ? Theme.selectedStroke : Theme.controlBorder,
                                        lineWidth: isSelected ? 2 : 1)
                 )
-                .overlay(alignment: .topTrailing) {
-                    if isSelected {
-                        Image(systemName: "checkmark")
-                            .font(.caption2.weight(.heavy))
-                            .foregroundStyle(Theme.onFill)
-                            .padding(Theme.Spacing.xs - 2)
-                            .transition(.scale.combined(with: .opacity))
-                            .accessibilityHidden(true)
-                    }
-                }
                 .contentShape(shape)
         }
         .buttonStyle(PressableButtonStyle())
