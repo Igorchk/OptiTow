@@ -22,8 +22,7 @@ struct OptiTowApp: App {
         WindowGroup {
             DispatchFormView()
                 .environment(sync)
-                .preferredColorScheme(.dark)
-                .tint(Theme.selected)
+                .tint(Theme.link)
                 .task { sync.start() }
         }
         .modelContainer(container)

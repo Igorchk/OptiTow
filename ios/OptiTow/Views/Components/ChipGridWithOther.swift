@@ -22,12 +22,14 @@ struct ChipGridWithOther: View {
     }
 
     var body: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: Theme.Spacing.grid) {
             ChipGrid(options: options + [Self.otherLabel], selection: chipSelection, minChipWidth: minChipWidth)
             if isOther {
-                BigTextField(placeholder: otherPlaceholder, text: $value)
+                BigTextField(label: otherPlaceholder, placeholder: otherPlaceholder, text: $value)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
+        .themeAnimation(value: isOther)
     }
 
     private var chipSelection: Binding<String> {
