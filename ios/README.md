@@ -11,7 +11,7 @@ This is an offline-first data pusher (SwiftUI, SwiftData, Swift 6, iOS 17+). It 
 3. Under **Signing & Capabilities**, select your team. The bundle ID is `com.optitow.dispatcher`; change it if needed.
 4. Run on a device or the Simulator.
 
-**Without `Secrets.plist`:** the app still saves calls. The sync pill shows a setup error, and the queue drains once the file is added and the app is rebuilt.
+**Without `Secrets.plist`:** the app still saves calls. The toolbar badge shows a setup error, and the queue drains once the file is added and the app is rebuilt.
 
 The project uses a synchronized folder: any file added under `OptiTow/` joins the target automatically.
 
@@ -51,7 +51,13 @@ OptiTow/
   Catalog/VehicleCatalog.swift  make → models lookup
   Resources/vehicles.json       15 makes and their top models
   Views/DispatchFormView.swift  the only screen
-  Views/Components/             chip grids, outcome toggle, sync pill, theme
+  Views/MileageCalculatorView.swift  standalone Quick Mileage sheet
+  Views/AddressSearchSheet.swift     the address search and suggestions sheet
+  Views/Components/             chips, outcome toggle, address field, trip mileage card, theme
+  Maps/AddressSearch.swift      California address suggestions (MKLocalSearchCompleter)
+  Maps/TripRouter.swift         yard -> pickup -> dropoff -> yard driving legs (MKDirections)
+  Maps/TripMileage.swift        miles math, leg totals, failure types
+  Config/YardLocation.swift     the yard (default Rio Linda, CA) and California bounds
 ```
 
 ## Sync rules
@@ -77,6 +83,10 @@ How each failure is handled:
 - **Outcome toggle:** a large Won/Lost toggle sits at the bottom of the form. Decline reasons appear only when the call is Lost. A call can't be saved until Won or Lost is picked.
 - **Light and dark:** the app follows the system appearance. Colors are semantic tokens in `Theme.swift`, so both modes come from one set of definitions.
 - **No history:** there are no search bars or history lists. The toolbar badge shows the sync state (all synced, syncing, offline with calls queued, retrying, failed, or setup needed). Tapping it opens a sheet that explains the state and offers **Retry Sync**.
+- **Address search and trip mileage:** Pickup and Dropoff are static rows that open an Address Search sheet with California address suggestions; tapping one confirms the address and its coordinate, and "Use as typed" keeps free text. With both confirmed, a Trip Mileage card shows the three driving legs (yard to pickup, loaded, back to the yard) and a total from Apple Maps. This is display only: nothing about it is saved or synced, and without a connection the fields stay plain text. Set a different yard with optional `YARD_ADDRESS`, `YARD_LAT` and `YARD_LON` keys in `Secrets.plist`.
+- **Start Location:** a static row like Pickup and Dropoff. A confirmed address replaces the configured yard as the route's origin and return point; empty or manual falls back to the yard.
+- **Save button:** it appears under the Outcome card only once the call can be saved (10-digit phone and an outcome). There is no pinned bottom bar.
+- **Quick Mileage:** the toolbar map button opens a standalone mileage calculator in a sheet, separate from the call in progress.
 - **Private Cash shortcut:** choosing **Private Cash** fills the payer with **Cash / Customer** if no payer is set yet.
 
 ## Known limits
