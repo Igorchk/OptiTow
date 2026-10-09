@@ -42,10 +42,13 @@ struct TripRouter: Sendable {
         TripRouter(yard: YardLocation.current.coordinate, provider: MapKitRouteProvider())
     }
 
-    func calculate(pickup: CLLocationCoordinate2D, dropoff: CLLocationCoordinate2D) async -> TripResult {
-        async let toPickup = leg(from: yard, to: pickup)
+    /// `start` is where the truck leaves from and returns to; the configured yard when nil.
+    func calculate(start: CLLocationCoordinate2D? = nil, pickup: CLLocationCoordinate2D,
+                   dropoff: CLLocationCoordinate2D) async -> TripResult {
+        let origin = start ?? yard
+        async let toPickup = leg(from: origin, to: pickup)
         async let loaded = leg(from: pickup, to: dropoff)
-        async let toYard = leg(from: dropoff, to: yard)
+        async let toYard = leg(from: dropoff, to: origin)
         let results = await [toPickup, loaded, toYard]
 
         func miles(_ index: Int) -> Double? { try? results[index].get() }
@@ -112,8 +115,11 @@ final class TripMileageModel {
         case let (.resolved(pickup), .resolved(dropoff)):
             state = .loading
             let router = router
-            task = Task {
-                let result = await router.calculate(pickup: pickup.coordinate, dropoff: dropoff.coordinate)
+            var origin: CLLocationCoordinate2D?
+            if case .resolved(let start) = endpoints.start { origin = start.coordinate }
+            task = Task { [origin] in
+                let result = await router.calculate(start: origin, pickup: pickup.coordinate,
+                                                    dropoff: dropoff.coordinate)
                 guard !Task.isCancelled else { return }
                 if let failure = result.failure {
                     state = .failed(result.legs, failure)

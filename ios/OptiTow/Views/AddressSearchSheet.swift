@@ -8,6 +8,7 @@ import SwiftUI
 /// negotiate with the dispatch form's scroll view.
 struct AddressSearchSheet: View {
     let title: String
+    let manualRowTitle: String
     let onPick: (String, AddressEntry) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -16,8 +17,10 @@ struct AddressSearchSheet: View {
     @FocusState private var fieldFocused: Bool
     @Environment(\.dynamicTypeSize) private var typeSize
 
-    init(title: String, initialText: String, onPick: @escaping (String, AddressEntry) -> Void) {
+    init(title: String, initialText: String, manualRowTitle: String = "Use as typed — no mileage",
+         onPick: @escaping (String, AddressEntry) -> Void) {
         self.title = title
+        self.manualRowTitle = manualRowTitle
         self.onPick = onPick
         _query = State(initialValue: initialText)
     }
@@ -116,7 +119,7 @@ struct AddressSearchSheet: View {
             if trimmed.count >= 2 {
                 Button(action: useAsTyped) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Use as typed — no mileage").font(.body.weight(.semibold)).foregroundStyle(Theme.link)
+                        Text(manualRowTitle).font(.body.weight(.semibold)).foregroundStyle(Theme.link)
                         Text(trimmed).metadata().lineLimit(1).truncationMode(.middle)
                     }
                     .frame(maxWidth: .infinity, minHeight: Theme.controlMinHeight - Theme.Spacing.md, alignment: .leading)

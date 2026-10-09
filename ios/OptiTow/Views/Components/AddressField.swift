@@ -11,6 +11,9 @@ struct AddressField: View {
     let placeholder: String
     @Binding var text: String
     @Binding var entry: AddressEntry
+    /// Wording for the "Use as typed" outcome; the start location differs (it falls back to the yard).
+    var manualStatus = "Manual address — no mileage"
+    var manualRowTitle = "Use as typed — no mileage"
 
     @State private var showSearch = false
     @Environment(\.dynamicTypeSize) private var typeSize
@@ -58,7 +61,7 @@ struct AddressField: View {
             status
         }
         .sheet(isPresented: $showSearch) {
-            AddressSearchSheet(title: label, initialText: text) { address, chosen in
+            AddressSearchSheet(title: label, initialText: text, manualRowTitle: manualRowTitle) { address, chosen in
                 text = address
                 entry = chosen
             }
@@ -71,7 +74,7 @@ struct AddressField: View {
         case .resolved:
             Text("Confirmed address").font(.footnote.weight(.medium)).foregroundStyle(Theme.Tone.success.foreground)
         case .manual:
-            Text("Manual address — no mileage").metadata()
+            Text(manualStatus).metadata()
         case .unset:
             EmptyView()
         }

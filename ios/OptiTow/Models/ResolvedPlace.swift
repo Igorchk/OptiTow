@@ -49,8 +49,10 @@ enum AddressEntry: Equatable, Sendable {
     case resolved(ResolvedPlace)
 }
 
-/// Both ends of the trip, as the mileage card sees them.
+/// The stops of the trip, as the mileage card sees them. `start` is where the truck leaves from and
+/// returns to; unless it is a confirmed address, the configured yard is used.
 struct TripEndpoints: Equatable, Sendable {
+    var start: AddressEntry = .unset
     var pickup: AddressEntry = .unset
     var dropoff: AddressEntry = .unset
 }

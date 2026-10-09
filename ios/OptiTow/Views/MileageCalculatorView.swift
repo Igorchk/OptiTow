@@ -8,6 +8,8 @@ struct MileageCalculatorView: View {
 
     @State private var pickupText = ""
     @State private var dropoffText = ""
+    @State private var startText = ""
+    @State private var start = AddressEntry.unset
     @State private var pickup = AddressEntry.unset
     @State private var dropoff = AddressEntry.unset
     @State private var trip = TripMileageModel()
@@ -17,6 +19,12 @@ struct MileageCalculatorView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
                     FormSection(title: "Route") {
+                        FieldGroup(label: "Start Location") {
+                            AddressField(label: "Start location", placeholder: "Tap to enter start location (default: yard)",
+                                         text: $startText, entry: $start,
+                                         manualStatus: "Manual start — mileage uses the yard",
+                                         manualRowTitle: "Use as typed — mileage uses the yard")
+                        }
                         FieldGroup(label: "Pickup Address") {
                             AddressField(label: "Pickup address", placeholder: "Tap to enter pickup address",
                                          text: $pickupText, entry: $pickup)
@@ -51,7 +59,7 @@ struct MileageCalculatorView: View {
                 }
                 #endif
             }
-            .onChange(of: TripEndpoints(pickup: pickup, dropoff: dropoff)) { _, endpoints in
+            .onChange(of: TripEndpoints(start: start, pickup: pickup, dropoff: dropoff)) { _, endpoints in
                 trip.update(endpoints)
             }
         }
