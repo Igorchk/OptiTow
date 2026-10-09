@@ -20,10 +20,15 @@ struct CallDraft: Equatable {
     var start_location = ""
     var pickup_address = ""
     var dropoff_address = ""
+    /// What was chosen in the address fields. Form-only: never saved or synced (only the text is).
+    var pickup_entry = AddressEntry.unset
+    var dropoff_entry = AddressEntry.unset
     var quoted_price = ""
     var outcome = ""
     var decline_reason = ""
     var notes_comments = ""
+
+    var tripEndpoints: TripEndpoints { TripEndpoints(pickup: pickup_entry, dropoff: dropoff_entry) }
 
     var quotedPriceValue: Double? {
         let cleaned = quoted_price.replacingOccurrences(of: "$", with: "")

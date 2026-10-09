@@ -11,6 +11,8 @@ struct DispatchFormView: View {
     @State private var saveError: String?
     @State private var showSyncDetail = false
     @State private var confirmClear = false
+    @State private var trip = TripMileageModel()
+    @State private var addressListOpen = false
 
     private let catalog = VehicleCatalog.shared
 
@@ -34,6 +36,7 @@ struct DispatchFormView: View {
                         jobSection
                         vehicleSection
                         locationSection
+                        TripMileageCard(state: trip.state, onRetry: trip.retry)
                         quoteSection
                         outcomeSection
                         notesSection
@@ -44,7 +47,13 @@ struct DispatchFormView: View {
                 }
                 .scrollDismissesKeyboard(.interactively)
                 .background(Theme.background)
-                .safeAreaInset(edge: .bottom) { saveBar(proxy: proxy) }
+                .environment(\.scrollFormTo, FormScroller { id in
+                    withAnimation(Theme.spring) { proxy.scrollTo(id, anchor: .top) }
+                })
+                .onPreferenceChange(AddressListOpenKey.self) { addressListOpen = $0 }
+                .safeAreaInset(edge: .bottom) {
+                    if !addressListOpen { saveBar(proxy: proxy) }
+                }
             }
             .navigationTitle("New Call")
             #if os(iOS)
@@ -75,6 +84,9 @@ struct DispatchFormView: View {
             if catalog.models(for: oldMake).contains(model) && !catalog.models(for: newMake).contains(model) {
                 draft.vehicle_model = ""
             }
+        }
+        .onChange(of: draft.tripEndpoints) { _, endpoints in
+            trip.update(endpoints)
         }
         .onChange(of: draft.vehicle_year) { _, newValue in
             let digits = String(newValue.filter(\.isNumber).prefix(4))
@@ -147,11 +159,12 @@ struct DispatchFormView: View {
                 ChipGrid(options: ChipOptions.sceneLocation, selection: $draft.scene_location)
             }
             FieldGroup(label: "Pickup Address") {
-                BigTextField(label: "Pickup address", placeholder: "I-80 & Madison Ave, Sacramento",
-                             text: $draft.pickup_address)
+                AddressField(label: "Pickup address", placeholder: "I-80 & Madison Ave, Sacramento",
+                             text: $draft.pickup_address, entry: $draft.pickup_entry)
             }
             FieldGroup(label: "Dropoff Address") {
-                BigTextField(label: "Dropoff address", placeholder: "123 Auto Body Way", text: $draft.dropoff_address)
+                AddressField(label: "Dropoff address", placeholder: "123 Auto Body Way",
+                             text: $draft.dropoff_address, entry: $draft.dropoff_entry)
             }
             FieldGroup(label: "Start Location") {
                 BigTextField(label: "Start location", placeholder: "Yard", text: $draft.start_location)
@@ -271,12 +284,6 @@ struct DispatchFormView: View {
             try? await Task.sleep(for: .seconds(1.6))
             withAnimation(Theme.spring) { showSavedBanner = false }
         }
-    }
-
-    private func dismissKeyboard() {
-        #if os(iOS)
-        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-        #endif
     }
 }
 

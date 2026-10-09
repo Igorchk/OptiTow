@@ -41,6 +41,14 @@ The app must not show, store or POST either field.
 - `customer_phone` is **mandatory**: at least 10 digits, ignoring formatting (dashes, spaces, parentheses, a leading `+1`). The phone number is how CallRail data is merged into the call, so a call without one can't be saved. The "Save Call" button stays disabled and dimmed, and says what is missing, until the phone has 10 digits and an outcome is chosen.
 - The Apps Script enforces the same rule and answers `BAD_REQUEST` ("customer_phone is required and must be at least 10 digits.") for an app sync that breaks it.
 
+## 5c. Address Search and Trip Mileage (display only)
+- **Autocomplete:** the Pickup and Dropoff fields show suggestions as the dispatcher types (Apple `MKLocalSearchCompleter`, address results, biased to California and filtered to California). Tapping one fills the field with the full resolved address and confirms its coordinate. Editing the text afterward drops the confirmation.
+- **"Use as typed":** the last row of the list keeps the text exactly as written (highway mile markers, cross streets, unnumbered spots). Such an address has no mileage; the Trip Mileage card says "Manual address — mileage unavailable". Saving is never blocked.
+- **Trip Mileage card** (under Location): once both addresses are confirmed it shows three Apple Maps driving legs, rounded to 0.1 mile: **To Pickup** (yard to pickup), **Loaded** (pickup to dropoff) and **To Yard** (dropoff to yard), plus a **Total Miles** callout (the sum of the three rounded legs). It shows a loading state, and per-leg dashes with a "Try again" button if a route fails or there is no connection.
+- **The yard** defaults to Rio Linda, CA. Optional `YARD_ADDRESS`, `YARD_LAT` and `YARD_LON` keys in `Secrets.plist` override it (the point must be in California).
+- **Nothing here is synced.** The payload, `SCHEMA.md` and the sheet are unchanged. The sheet keeps computing its own `Loaded_Miles` and `Deadhead_Est_Miles` from the address text (Google Maps), so the phone's numbers are an estimate for quoting and can differ slightly. The full resolved address in the existing field helps that geocoding.
+- **Offline:** search and routing need a connection. Without one the fields behave as plain text and the card says it can't reach Maps.
+
 ## 6. The ML Target Variable
 - `outcome`: This must be a MASSIVE visual toggle button at the bottom: [1 - Won / Booked] or [0 - Lost / Declined].
 - `decline_reason`: ONLY show this chip grid if the Outcome is "0 - Lost". Options: [Price Too High, ETA Too Long, Already Found Help, Changed Mind].

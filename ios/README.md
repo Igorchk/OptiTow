@@ -51,7 +51,11 @@ OptiTow/
   Catalog/VehicleCatalog.swift  make → models lookup
   Resources/vehicles.json       15 makes and their top models
   Views/DispatchFormView.swift  the only screen
-  Views/Components/             chip grids, outcome toggle, sync pill, theme
+  Views/Components/             chips, outcome toggle, address field, trip mileage card, theme
+  Maps/AddressSearch.swift      California address suggestions (MKLocalSearchCompleter)
+  Maps/TripRouter.swift         yard -> pickup -> dropoff -> yard driving legs (MKDirections)
+  Maps/TripMileage.swift        miles math, leg totals, failure types
+  Config/YardLocation.swift     the yard (default Rio Linda, CA) and California bounds
 ```
 
 ## Sync rules
@@ -77,6 +81,7 @@ How each failure is handled:
 - **Outcome toggle:** a large Won/Lost toggle sits at the bottom of the form. Decline reasons appear only when the call is Lost. A call can't be saved until Won or Lost is picked.
 - **Light and dark:** the app follows the system appearance. Colors are semantic tokens in `Theme.swift`, so both modes come from one set of definitions.
 - **No history:** there are no search bars or history lists. The toolbar badge shows the sync state (all synced, syncing, offline with calls queued, retrying, failed, or setup needed). Tapping it opens a sheet that explains the state and offers **Retry Sync**.
+- **Address search and trip mileage:** typing in Pickup or Dropoff shows California address suggestions; tapping one confirms the address and its coordinate, and "Use as typed" keeps free text. With both confirmed, a Trip Mileage card shows the three driving legs (yard to pickup, loaded, back to the yard) and a total from Apple Maps. This is display only: nothing about it is saved or synced, and without a connection the fields stay plain text. Set a different yard with optional `YARD_ADDRESS`, `YARD_LAT` and `YARD_LON` keys in `Secrets.plist`.
 - **Private Cash shortcut:** choosing **Private Cash** fills the payer with **Cash / Customer** if no payer is set yet.
 
 ## Known limits

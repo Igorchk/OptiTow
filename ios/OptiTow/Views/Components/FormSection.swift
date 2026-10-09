@@ -51,6 +51,10 @@ struct BigTextField: View {
     let placeholder: String
     @Binding var text: String
     var keyboard: KeyboardKind = .text
+    /// Turn off autocorrect for free text such as street names.
+    var disablesAutocorrection = false
+    /// Told when the field gains or loses focus (the address field shows suggestions while focused).
+    var onFocusChange: ((Bool) -> Void)?
 
     enum KeyboardKind {
         case text, phone, number, decimal
@@ -67,7 +71,8 @@ struct BigTextField: View {
             .frame(minHeight: minHeight)
             .inputSurface(isFocused: isFocused)
             .themeAnimation(value: isFocused)
-            .autocorrectionDisabled(keyboard != .text)
+            .onChange(of: isFocused) { _, focused in onFocusChange?(focused) }
+            .autocorrectionDisabled(keyboard != .text || disablesAutocorrection)
             #if os(iOS)
             .keyboardType(keyboard.uiKeyboardType)
             .textInputAutocapitalization(keyboard == .text ? .words : .never)

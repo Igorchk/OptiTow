@@ -56,6 +56,11 @@ enum Theme {
     static let fillMuted = Color.primary.opacity(0.07)
     /// The hairline that outlines cards and separates the save bar.
     static let hairline = Color.primary.opacity(0.07)
+    /// The one emphasized block on the form (the mileage total). Black with white text on light; on dark
+    /// a raised charcoal with white text, so it stays high-contrast (about 13:1) without a bright
+    /// white slab glaring in a truck cab at night.
+    static let inverseFill = Color(light: Color.black, dark: Color(white: 0.26))
+    static let inverseText = Color.white
     /// Soft ambient shadow under cards. Visible on the light canvas, absent in dark mode.
     static let shadow = Color.black.opacity(0.07)
 
