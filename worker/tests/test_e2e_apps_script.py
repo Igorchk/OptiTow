@@ -11,6 +11,7 @@ import shutil
 import socket
 import subprocess
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -228,3 +229,65 @@ def test_a_placeholder_page_instead_of_audio_is_rejected_with_a_readable_reason(
     assert "ffmpeg" not in entry["last_error"], "never reached the decoder"
     assert FAKE_ACCOUNT not in entry["last_error"]
     assert rows(server)[APP_LINK]["Caller_Tone"] == "", "nothing was guessed or written"
+
+
+# --- "no longer available" through the real fetcher and the real Apps Script ---------------------------
+
+GONE = {"error": "This call is no longer available."}
+# callrail(): start 14:40 -07:00 = 21:40Z, 120 s long, so the call ends at 21:42Z.
+CALL_ENDED = datetime(2026, 10, 2, 21, 42, 0, tzinfo=timezone.utc)
+
+
+def unavailable_handler(account_ok=True, seen=None):
+    def handler(request):
+        if seen is not None:
+            seen.append(request.url.path)
+        if request.url.path.endswith("recording.json"):
+            return httpx.Response(200, json=GONE)
+        if request.url.path == f"/v3/a/{FAKE_ACCOUNT}.json":
+            return httpx.Response(200, json={"id": "ACC1", "numeric_id": int(FAKE_ACCOUNT)}) if account_ok \
+                else httpx.Response(404, json={"error": "Not found"})
+        raise AssertionError(f"unexpected request {request.url}")
+    return handler
+
+
+def run_at(server, tmp_path, minutes_after_call, handler):
+    deps = deps_with_callrail(server, tmp_path, handler)
+    deps.clock = lambda: CALL_ENDED + timedelta(minutes=minutes_after_call)
+    return run_batch(CFG, deps), deps
+
+
+def test_a_fresh_call_whose_recording_is_not_ready_waits_and_is_then_retired_blank(server, tmp_path):
+    callrail(server, 9, recording=APP_LINK, source="Google Ads")
+    row = lambda: rows(server)[APP_LINK]  # noqa: E731
+    seen = []
+
+    # 5 minutes after the call: deferred. Nothing written, no account request, no failure recorded.
+    summary, _ = run_at(server, tmp_path, 5, unavailable_handler(seen=seen))
+    assert (summary.pending, summary.deferred, summary.unavailable, summary.skipped) == (1, 1, 0, 0)
+    assert row()["AI_Processed_At"] == "" and row()["Caller_Tone"] == ""
+    assert not any(p.endswith(f"{FAKE_ACCOUNT}.json") for p in seen), "the account was not even checked"
+    assert not (tmp_path / "state.json").exists() or json.loads((tmp_path / "state.json").read_text()) == {}
+
+    # Still pending on the next run (it was never closed or parked).
+    summary, _ = run_at(server, tmp_path, 20, unavailable_handler())
+    assert (summary.pending, summary.deferred) == (1, 1)
+
+    # 31 minutes after the call: the account checks out, so the row is retired with the AI cells blank.
+    summary, _ = run_at(server, tmp_path, 31, unavailable_handler(seen=seen))
+    assert (summary.unavailable, summary.deferred, summary.skipped) == (1, 0, 0)
+    assert row()["AI_Processed_At"], "stamped processed: it leaves the queue"
+    assert row()["Caller_Tone"] == "" and row()["Mentioned_Damage"] == "", "AI cells stay blank, not N/A"
+    assert row()["Lead_Source"] == "Google Ads", "CallRail attribution untouched"
+    again, _ = run_at(server, tmp_path, 60, unavailable_handler())
+    assert again.pending == 0
+
+
+def test_an_old_call_is_never_retired_when_the_account_check_fails(server, tmp_path):
+    callrail(server, 10, recording=APP_LINK)
+    summary, _ = run_at(server, tmp_path, 120, unavailable_handler(account_ok=False))
+    assert (summary.skipped, summary.unavailable) == (1, 0)
+    assert rows(server)[APP_LINK]["AI_Processed_At"] == "", "a wrong key or account id cannot retire real calls"
+    entry = next(iter(json.loads((tmp_path / "state.json").read_text()).values()))
+    assert entry["failures"] == 1 and "account check failed" in entry["last_error"]
+    assert FAKE_ACCOUNT not in entry["last_error"]

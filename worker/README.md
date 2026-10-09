@@ -73,7 +73,11 @@ Unanswered calls, dropped calls and recordings of a carrier or voicemail system 
 
 ### Calls CallRail no longer has
 
-If the recording API answers "This call is no longer available." and a one-off check of the API key and account id succeeds, the call is gone from CallRail (deleted, purged, or never in this account). That is not junk and not a failure: the row is stamped `AI_Processed_At` with `mark_processed`, its AI cells stay blank so analytics are not skewed, and it is never retried or parked. The run summary counts these as `unavailable`. If the account check fails, it is an ordinary retried failure instead, so a wrong key or account id can never retire real calls.
+The recording API answers "This call is no longer available." both for calls CallRail has really deleted and for calls whose audio is simply not ready yet. The worker tells them apart by how long ago the call **ended** (its start time plus its duration):
+
+- **Ended less than 30 minutes ago (`RECORDING_GRACE_MINUTES` in `main.py`):** the row is left alone and retried on the next run. No account check is made, nothing is written, and nothing counts as a failure, so the row can never be parked. The log says why ("Recording not ready for … inside the 30 min grace period"), and the run summary counts these as `deferred`.
+- **Ended 30 minutes ago or more, or the start time is unknown:** a one-off check of the API key and account id runs. If it succeeds, the call is gone from CallRail (deleted, purged, or never in this account). That is not junk and not a failure: the row is stamped `AI_Processed_At` with `mark_processed`, its AI cells stay blank so analytics are not skewed, and it is never retried or parked. The summary counts these as `unavailable`.
+- **Account check fails:** an ordinary retried failure instead, so a wrong key or account id can never retire real calls.
 
 ## How a run works
 
@@ -99,6 +103,8 @@ The sheet stores the link CallRail put in its webhook, usually `app.callrail.com
 `GET https://api.callrail.com/v3/a/{CALLRAIL_ACCOUNT_ID}/calls/{CAL…}/recording.json` with `Authorization: Token token=<CALLRAIL_API_KEY>`
 
 That answers with a redirect to the MP3, which is then downloaded **without** the key. Direct or signed media URLs from other hosts are still fetched as they are.
+
+When CallRail's JSON reply has no recording link, the error names what did arrive: the field names and their types, plus CallRail's own `error`/`message` text with URLs and the account id removed (for example `recording reply had no 'url' (fields: recording_link:str, status:str)`). Values are never logged, so a renamed field is obvious from one line without leaking links or personal data.
 
 Whatever comes back is checked before ffmpeg sees it. Anything that isn't audio (`text/plain`, `text/html`, JSON without a link, or a page served as generic binary) is rejected with a message such as `response is not audio (content-type text/plain, 41 bytes starting "…")`.
 
