@@ -15,6 +15,11 @@ def reply(**overrides):
     return json.dumps(body)
 
 
+def full_reply(**overrides):
+    """A reply for the full model: the three classic fields plus the call intent and its summary."""
+    return reply(**{"call_intent": "NEW_LEAD", "admin_summary": None, **overrides})
+
+
 # --- schema -----------------------------------------------------------------
 
 
@@ -62,9 +67,9 @@ def test_model_for_rejects_unknown_or_empty():
 
 
 def test_update_fields_write_none_for_no_damage_and_dedupe():
-    assert to_update_fields(Enrichment.model_validate(json.loads(reply(mentioned_damage=[])))) ["mentioned_damage"] == "None"
+    assert to_update_fields(Enrichment.model_validate(json.loads(full_reply(mentioned_damage=[])))) ["mentioned_damage"] == "None"
     out = to_update_fields(Enrichment.model_validate(
-        json.loads(reply(mentioned_damage=["Flat tire", " flat tire ", "dented door"]))))
+        json.loads(full_reply(mentioned_damage=["Flat tire", " flat tire ", "dented door"]))))
     assert out["mentioned_damage"] == ["Flat tire", "dented door"]
 
 
@@ -172,7 +177,7 @@ def test_the_model_may_answer_na_for_tone():
 
 def test_a_na_tone_overrides_the_rest_of_the_answer():
     fields = to_update_fields(Enrichment.model_validate(
-        json.loads(reply(caller_tone="N/A", mentioned_damage=["flat tire"], lead_source="Google Ads"))))
+        json.loads(full_reply(caller_tone="N/A", mentioned_damage=["flat tire"], lead_source="Google Ads"))))
     assert fields == {"caller_tone": "N/A", "mentioned_damage": "N/A"}
     partial = to_update_fields(model_for(["caller_tone", "mentioned_damage"]).model_validate(
         {"caller_tone": "N/A", "mentioned_damage": ["x"]}))
@@ -180,7 +185,7 @@ def test_a_na_tone_overrides_the_rest_of_the_answer():
 
 
 def test_a_real_call_with_no_damage_is_none_not_na():
-    fields = to_update_fields(Enrichment.model_validate(json.loads(reply(mentioned_damage=[]))))
+    fields = to_update_fields(Enrichment.model_validate(json.loads(full_reply(mentioned_damage=[]))))
     assert fields["mentioned_damage"] == "None" and fields["caller_tone"] == "Calm"
 
 

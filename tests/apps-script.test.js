@@ -50,7 +50,7 @@ const CR_QUERY = { source: 'callrail', token: API_SECRET };
 
 test('setup writes headers and reference data incl. Website Form', () => {
   const env = makeContext();
-  assert.equal(env.sheet.data[0].length, 29);
+  assert.equal(env.sheet.data[0].length, 31);
   assert.ok(!env.sheet.data[0].includes('Urgency_Level'));
   const leadCol = env.ref.data[0].indexOf('Lead_Source');
   assert.ok(env.ref.data.some((r) => r[leadCol] === 'Website Form'));
@@ -879,4 +879,105 @@ test('landing page: an invalid token cannot inject script and gets a plain error
     assert.ok(!page.html.includes('getCurrentPosition'), 'no script for an invalid link');
     assert.ok(!page.html.includes('alert(1)'));
   }
+});
+
+
+// ---------------------------------------------------------------------------
+// Call intent (status checks and admin inquiries)
+// ---------------------------------------------------------------------------
+
+function callRailRow(env, overrides = {}) {
+  return post(env, { id: 'CAL9', customer_phone_number: '+19165550177', start_time: '2026-10-02T14:40:00.000-07:00', duration: '120',
+    recording: 'https://api.callrail.com/v3/a/A/calls/CAL9/recording.json', ...overrides }, { source: 'callrail', token: API_SECRET });
+}
+const ai = (env, call_id, fields) => post(env, { token: API_SECRET, action: 'update', call_id, ...fields }, { source: 'ai' });
+
+test('intent: pending items report the Call_Intent cell (blank until classified)', () => {
+  const env = makeContext();
+  const cr = callRailRow(env);
+  const item = post(env, { token: API_SECRET, action: 'pending' }, { source: 'ai' }).items[0];
+  assert.equal(item.call_intent, '');
+  ai(env, cr.call_id, { call_intent: 'STATUS_CHECK', admin_summary: 'Adjuster checking delivery status.' });
+  assert.equal(rowObj(env, cr.row).Call_Intent, 'STATUS_CHECK');
+});
+
+test('intent: a status check stores the intent and the one-sentence summary', () => {
+  const env = makeContext();
+  const cr = callRailRow(env);
+  const out = ai(env, cr.call_id, {
+    call_intent: 'STATUS_CHECK', admin_summary: 'Adjuster checking delivery status on 2019 Civic at Copart.',
+    caller_tone: 'N/A', mentioned_damage: 'N/A',
+  });
+  assert.equal(out.ok, true);
+  assert.deepEqual(out.warnings, []);
+  const row = rowObj(env, cr.row);
+  assert.equal(row.Call_Intent, 'STATUS_CHECK');
+  assert.equal(row.Admin_Summary, 'Adjuster checking delivery status on 2019 Civic at Copart.');
+  assert.ok(row.AI_Processed_At);
+  // The dispatcher block is never touched.
+  assert.equal(row.Outcome, '');
+  assert.equal(row.Notes_Comments, '');
+});
+
+test('intent: the summary is ignored for a new lead or when there is no intent, and is capped', () => {
+  const env = makeContext();
+  const a = callRailRow(env, { id: 'CAL1', recording: 'https://x/1' });
+  const lead = ai(env, a.call_id, { call_intent: 'NEW_LEAD', admin_summary: 'should not be stored', caller_tone: 'Calm' });
+  assert.ok(lead.warnings.some((w) => /Admin_Summary/.test(w)));
+  assert.equal(rowObj(env, a.row).Admin_Summary, '');
+  assert.equal(rowObj(env, a.row).Call_Intent, 'NEW_LEAD');
+
+  const b = callRailRow(env, { id: 'CAL2', customer_phone_number: '+19165550166', recording: 'https://x/2' });
+  const noIntent = ai(env, b.call_id, { admin_summary: 'orphan summary' });
+  assert.ok(noIntent.warnings.some((w) => /Admin_Summary/.test(w)));
+  assert.equal(rowObj(env, b.row).Admin_Summary, '');
+
+  const c = callRailRow(env, { id: 'CAL3', customer_phone_number: '+19165550155', recording: 'https://x/3' });
+  ai(env, c.call_id, { call_intent: 'ADMIN_INQUIRY', admin_summary: 'x'.repeat(900) });
+  assert.equal(rowObj(env, c.row).Admin_Summary.length, 300);
+});
+
+test('intent: values outside the picklist are ignored with a warning, and cells are fill-only-if-blank', () => {
+  const env = makeContext();
+  const cr = callRailRow(env);
+  const bad = ai(env, cr.call_id, { call_intent: 'SALES', caller_tone: 'Calm' });
+  assert.ok(bad.warnings.some((w) => /Call_Intent "SALES"/.test(w)));
+  assert.equal(rowObj(env, cr.row).Call_Intent, '');
+
+  ai(env, cr.call_id, { call_intent: 'STATUS_CHECK', admin_summary: 'first' });
+  const again = ai(env, cr.call_id, { call_intent: 'NEW_LEAD', admin_summary: 'second' });
+  assert.ok(again.warnings.some((w) => /Call_Intent: already set/.test(w)));
+  assert.equal(rowObj(env, cr.row).Call_Intent, 'STATUS_CHECK');
+  assert.equal(rowObj(env, cr.row).Admin_Summary, 'first');
+});
+
+test('intent: a summary may be added later to an existing operational row, but not to a lead', () => {
+  const env = makeContext();
+  const cr = callRailRow(env);
+  ai(env, cr.call_id, { call_intent: 'ADMIN_INQUIRY' });
+  ai(env, cr.call_id, { admin_summary: 'Customer asking about storage gate hours.' });
+  assert.equal(rowObj(env, cr.row).Admin_Summary, 'Customer asking about storage gate hours.');
+});
+
+test('migration: a sheet with the original 29 headers gets Call_Intent and Admin_Summary added, nothing else moves', () => {
+  const env = makeContext();
+  const first = post(env, appPayload());
+  assert.equal(first.ok, true);
+  const before = JSON.stringify(env.sheet.data[1].slice(0, 29));
+  env.sheet.data[0] = env.sheet.data[0].slice(0, 29); // the live sheet from before this change
+  env.sheet.data.forEach((row, i) => { if (i > 0) env.sheet.data[i] = row.slice(0, 29); });
+
+  const second = post(env, appPayload({ call_id: 'B1B2C3D4-0000-4000-8000-000000000002', customer_phone: '916-555-0102' }));
+  assert.equal(second.ok, true, JSON.stringify(second));
+  assert.deepEqual(env.sheet.data[0].slice(29), ['Call_Intent', 'Admin_Summary']);
+  assert.equal(JSON.stringify(env.sheet.data[1].slice(0, 29)), before, 'existing rows are untouched');
+  assert.equal(env.sheet.data[0].length, 31, 'added once, not on every request');
+  post(env, appPayload({ call_id: 'C1B2C3D4-0000-4000-8000-000000000003', customer_phone: '916-555-0103' }));
+  assert.equal(env.sheet.data[0].length, 31);
+});
+
+test('migration: any other missing header is still a configuration error', () => {
+  const env = makeContext();
+  env.sheet.data[0] = env.sheet.data[0].map((h) => (h === 'Outcome' ? 'Outcome_Renamed' : h));
+  assert.equal(post(env, appPayload()).code, 'SERVER_MISCONFIGURED');
 });

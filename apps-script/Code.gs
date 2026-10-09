@@ -23,8 +23,9 @@
  *                     Deadhead_Est_Miles); website leads also set Lead_Source = "Website Form"
  *   CallRail       -> Lead_Source (only if blank), Search_Keyword, Campaign_Name,
  *                     Call_Duration_Sec, Call_Recording_URL
- *   AI worker      -> Caller_Tone, Mentioned_Damage, AI_Processed_At, and Lead_Source only if
- *                     still blank after CallRail
+ *   AI worker      -> Caller_Tone, Mentioned_Damage, AI_Processed_At, Call_Intent, Admin_Summary
+ *                     (status checks and admin inquiries), and Lead_Source only if still blank
+ *                     after CallRail
  */
 
 const CONFIG = Object.freeze({
@@ -49,8 +50,8 @@ const CONFIG = Object.freeze({
 // or in page code without escaping.
 const LOCATION_TOKEN_RE = /^[a-z0-9]{8,32}$/;
 
-// 29 columns. Columns 1-21 are the dispatcher block (app/website writes, plus the computed miles);
-// 22-29 are automated ingestion (CallRail, then the AI worker), so a dispatcher write can never
+// 31 columns. Columns 1-21 are the dispatcher block (app/website writes, plus the computed miles);
+// 22-31 are automated ingestion (CallRail, then the AI worker), so a dispatcher write can never
 // land on an automated column. Lookups are by header name, never by position.
 const HEADERS = Object.freeze([
   'Call_ID', 'Date_Time', 'Customer_Phone', 'Caller_Type', 'Payer_Name',
@@ -60,7 +61,12 @@ const HEADERS = Object.freeze([
   'Notes_Comments',
   'Lead_Source', 'Search_Keyword', 'Campaign_Name', 'Call_Duration_Sec', 'Call_Recording_URL',
   'Caller_Tone', 'Mentioned_Damage', 'AI_Processed_At',
+  'Call_Intent', 'Admin_Summary',
 ]);
+
+// Columns added after the first release. A sheet that predates them gets them appended to its header
+// row automatically (see getCallLog_), so deploying new code never breaks an existing sheet.
+const AUTO_ADDED_HEADERS = Object.freeze(['Call_Intent', 'Admin_Summary']);
 
 // JSON key (SCHEMA.md) -> sheet header. These are the dispatcher-owned columns.
 // Lead_Source is automated (CallRail, then AI fallback) and is deliberately absent here.
@@ -113,6 +119,9 @@ const ENUMS = Object.freeze({
   Scene_Location: ['Residential Driveway', 'Public Surface Street', 'Highway / Freeway Shoulder', 'Underground Parking Structure', 'Commercial Lot'],
   Outcome: [OUTCOME_WON, '0 - Lost / Declined'],
   Caller_Tone: ['Calm', 'Stressed', 'Frustrated', 'Angry', 'Confused', 'Rushed', 'Price Shopping', 'Cooperative', NOT_APPLICABLE],
+  // What a call was about. Only NEW_LEAD is a sales opportunity. Blank = not classified (including
+  // calls that were never a conversation).
+  Call_Intent: ['NEW_LEAD', 'STATUS_CHECK', 'ADMIN_INQUIRY'],
   Decline_Reason: ['Price Too High', 'ETA Too Long', 'Already Found Help', 'Changed Mind', DECLINE_NA_WON],
 });
 
@@ -808,6 +817,7 @@ function listPendingAudio_(body) {
         lead_source: String(r[c.Lead_Source]),
         caller_tone: String(r[c.Caller_Tone]),
         mentioned_damage: String(r[c.Mentioned_Damage]),
+        call_intent: String(r[c.Call_Intent]),
       });
     }
   }
@@ -821,10 +831,11 @@ function applyAiResult_(body) {
     throw new ApiError('BAD_REQUEST', 'call_id or call_recording_url is required.');
   }
   const hasContent = body.caller_tone !== undefined || body.mentioned_damage !== undefined ||
-    body.lead_source !== undefined;
+    body.lead_source !== undefined || body.call_intent !== undefined || body.admin_summary !== undefined;
   // `mark_processed` lets the worker retire a row whose AI cells were all filled by hand.
   if (!hasContent && body.mark_processed !== true) {
-    throw new ApiError('BAD_REQUEST', 'caller_tone, mentioned_damage, lead_source or mark_processed is required.');
+    throw new ApiError('BAD_REQUEST',
+      'caller_tone, mentioned_damage, lead_source, call_intent, admin_summary or mark_processed is required.');
   }
 
   return withLock_(function () {
@@ -863,6 +874,24 @@ function applyAiResult_(body) {
         ? body.mentioned_damage.map(function (d) { return String(cleanValue_(d)); }).filter(Boolean).join(', ')
         : String(cleanValue_(body.mentioned_damage));
       offer('Mentioned_Damage', damage.slice(0, 500));
+    }
+    // What the call was about. A summary is kept only for an operational call (status check or admin
+    // inquiry); for a new lead, or with no intent at all, it is ignored.
+    if (body.call_intent !== undefined) {
+      const intent = String(cleanValue_(body.call_intent));
+      if (ENUMS.Call_Intent.indexOf(intent) === -1) {
+        warnings.push('Ignored Call_Intent "' + intent + '": not in the Call_Intent picklist.');
+      } else {
+        offer('Call_Intent', intent);
+      }
+    }
+    if (body.admin_summary !== undefined) {
+      const effectiveIntent = String(updates.Call_Intent || current[log.col.Call_Intent] || '');
+      if (effectiveIntent === '' || effectiveIntent === 'NEW_LEAD') {
+        warnings.push('Ignored Admin_Summary: only for STATUS_CHECK or ADMIN_INQUIRY calls.');
+      } else {
+        offer('Admin_Summary', String(cleanValue_(body.admin_summary)).slice(0, 300));
+      }
     }
     if (body.lead_source !== undefined) {
       const proposed = String(cleanValue_(body.lead_source));
@@ -904,14 +933,22 @@ function withLock_(fn) {
 function getCallLog_() {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.CALL_LOG_SHEET);
   if (!sheet) throw new ApiError('SERVER_MISCONFIGURED', 'Missing "' + CONFIG.CALL_LOG_SHEET + '" tab.');
-  const width = sheet.getLastColumn();
+  let width = sheet.getLastColumn();
   const header = width ? sheet.getRange(1, 1, 1, width).getValues()[0] : [];
   const col = {};
   header.forEach(function (h, i) {
     const name = String(h).trim();
     if (name && !(name in col)) col[name] = i;
   });
-  const missing = HEADERS.filter(function (h) { return !(h in col); });
+  let missing = HEADERS.filter(function (h) { return !(h in col); });
+  const addable = missing.filter(function (h) { return AUTO_ADDED_HEADERS.indexOf(h) !== -1; });
+  if (addable.length) {
+    // Self-migration: append the newer columns after the last header.
+    sheet.getRange(1, width + 1, 1, addable.length).setValues([addable]);
+    addable.forEach(function (h, i) { col[h] = width + i; });
+    width += addable.length;
+    missing = missing.filter(function (h) { return !(h in col); });
+  }
   if (missing.length) {
     throw new ApiError('SERVER_MISCONFIGURED', 'Call Log is missing columns: ' + missing.join(', '));
   }

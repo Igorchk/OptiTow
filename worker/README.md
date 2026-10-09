@@ -8,6 +8,8 @@ It lives in its own directory so its Python dependencies stay separate from `ios
 
 | Column | Source | Rule |
 |---|---|---|
+| `Call_Intent` | model | `NEW_LEAD`, `STATUS_CHECK` or `ADMIN_INQUIRY`. Only `NEW_LEAD` calls are sales opportunities. Blank for calls that were never a conversation |
+| `Admin_Summary` | model | One sentence for a `STATUS_CHECK` or `ADMIN_INQUIRY` call (e.g. "Adjuster checking delivery status on 2019 Civic at Copart."). Blank for `NEW_LEAD` |
 | `Caller_Tone` | model | One of `Calm`, `Stressed`, `Frustrated`, `Angry`, `Confused`, `Rushed`, `Price Shopping`, `Cooperative`, or `N/A` when there is no real conversation |
 | `Mentioned_Damage` | model | Short phrases the caller actually states (max 8, 80 characters each), `None` for a real call with no damage mentioned, or `N/A` when there is no real conversation |
 | `Lead_Source` | model | One of the six values, **only if the cell is blank** after CallRail attribution |
@@ -16,6 +18,12 @@ It lives in its own directory so its Python dependencies stay separate from `ios
 **Nothing is ever overwritten.** The Apps Script fills each of these cells only if it is still blank, and the worker only asks the model for cells that are blank. Dispatcher columns and CallRail data are never touched, because the endpoint can't reach them.
 
 To re-run a row, clear its `Caller_Tone`, `Mentioned_Damage` and `AI_Processed_At` cells (and `Lead_Source` if you want it re-guessed).
+
+### Status checks and admin inquiries
+
+One model call classifies the call first. For `STATUS_CHECK` and `ADMIN_INQUIRY` (an adjuster asking whether a car was delivered, a customer asking about gate hours) the worker **overrides** whatever else the model said: `Caller_Tone` and `Mentioned_Damage` are `N/A`, `Lead_Source` is not guessed, and `Admin_Summary` holds the one-sentence summary. This is enforced in code (`schema.to_update_fields`), not just requested in the prompt. An operational intent with no summary is treated as "no real conversation" and no intent is written. The run summary counts these as `operational`. A call that asks for a new tow or a price is always `NEW_LEAD`, even if it also asks about an old one.
+
+The worker only asks for intent when the Apps Script's `pending` reply includes a `call_intent` key, so an updated worker still runs against an older deployment. Rows processed before this feature keep a blank `Call_Intent`.
 
 ## Setup
 

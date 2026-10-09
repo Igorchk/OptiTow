@@ -27,7 +27,7 @@ from urllib.parse import urlsplit
 
 from enricher import DEFAULT_LLM_MODEL, DEFAULT_WHISPER_MODEL, EnrichmentError, MlxLlm, WhisperTranscriber
 from guards import MIN_LIVE_CALL_SEC, MIN_TRANSCRIPT_CHARS, classify_transcript, is_short_call
-from schema import not_applicable_fields, to_update_fields
+from schema import is_operational, not_applicable_fields, to_update_fields
 from webhook import (
     AudioFetcher,
     FetchError,
@@ -212,6 +212,7 @@ class Summary:
     updated: int = 0
     skipped: int = 0
     not_conversation: int = 0  # unanswered, dropped or automated: recorded as N/A, no LLM used
+    operational: int = 0  # status checks and admin inquiries: not sales calls, tone/damage N/A
     unavailable: int = 0  # CallRail no longer has the call: row retired, AI cells left blank
     deferred: int = 0  # call too recent for its recording to be ready: left alone, retried next run
     stopped_early: str | None = None
@@ -220,7 +221,8 @@ class Summary:
     def line(self) -> str:
         extra = f", stopped early: {self.stopped_early}" if self.stopped_early else ""
         return (f"pending={self.pending} parked={self.parked} updated={self.updated} "
-                f"not_conversation={self.not_conversation} unavailable={self.unavailable} "
+                f"not_conversation={self.not_conversation} operational={self.operational} "
+                f"unavailable={self.unavailable} "
                 f"deferred={self.deferred} skipped={self.skipped}{extra}")
 
 
@@ -364,9 +366,13 @@ def run_batch(cfg: Config, deps: Deps, *, dry_run: bool = False) -> Summary:
                 except Exception as exc:
                     fail(call, f"enrichment failed: {type(exc).__name__}: {exc}")
                     continue
-                fields = to_update_fields(result)
+                fields = to_update_fields(result, known_intent=call.call_intent or None)
+                if is_operational(fields):
+                    log.info("Operational call %s: %s (%s)", call.call_id, fields["call_intent"],
+                             fields.get("admin_summary", ""))
+                    summary.operational += 1
                 # The model itself found no real conversation (the prompt rule): same as the guards.
-                if fields.get("caller_tone") == "N/A":
+                elif fields.get("caller_tone") == "N/A":
                     summary.not_conversation += 1
                 if not push(call, fields):
                     break

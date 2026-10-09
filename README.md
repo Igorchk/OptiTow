@@ -6,7 +6,7 @@ A work pipeline that helps dispatchers collect data on their incoming calls, to 
 iOS dispatcher app ──POST──▶ Google Apps Script ◀──webhook── CallRail
                                    │  ▲
                               Google Sheet ──pending calls──▶ Mac Mini AI worker
-                              (29 columns)  ◀──tone, damage, lead source──┘
+                              (31 columns)  ◀──tone, damage, lead source──┘
 ```
 
 | Part | Folder | What it is |
@@ -40,7 +40,7 @@ It is safe to re-run: it offers your saved values as defaults and replaces only 
 
 - [`CLAUDE.md`](CLAUDE.md): the master architecture and business rules.
 - [`APP_SPEC.md`](APP_SPEC.md): iOS app UI/UX rules and the exact chip values.
-- [`SCHEMA.md`](SCHEMA.md): the 29-column sheet layout and the iOS JSON payload.
+- [`SCHEMA.md`](SCHEMA.md): the 31-column sheet layout and the iOS JSON payload.
 
 ## Tests
 
@@ -53,4 +53,4 @@ The iOS app is built and run from Xcode. To try the sync end to end without a Go
 
 ## Data
 
-The sheet has 29 columns: columns 1–21 are written by the dispatcher app, column 22 (`Lead_Source`) comes from CallRail attribution, and the rest are automated (CallRail, then the AI worker). Nothing automated can overwrite a dispatcher value, and the AI only fills cells that are still blank. The picklists live in `apps-script/Code.gs` (`ENUMS`), and a contract test keeps the iOS app and the worker in step with them.
+The sheet has 31 columns: columns 1–21 are written by the dispatcher app, column 22 (`Lead_Source`) comes from CallRail attribution, and the rest are automated (CallRail, then the AI worker). Nothing automated can overwrite a dispatcher value, and the AI only fills cells that are still blank. The picklists live in `apps-script/Code.gs` (`ENUMS`), and a contract test keeps the iOS app and the worker in step with them.
