@@ -4,6 +4,7 @@ import SwiftUI
 struct DispatchFormView: View {
     @Environment(SyncManager.self) private var sync
     @Environment(\.dynamicTypeSize) private var typeSize
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var draft = CallDraft()
     @State private var savedCount = 0
@@ -12,7 +13,6 @@ struct DispatchFormView: View {
     @State private var showSyncDetail = false
     @State private var confirmClear = false
     @State private var trip = TripMileageModel()
-    @State private var addressListOpen = false
 
     private let catalog = VehicleCatalog.shared
 
@@ -48,12 +48,10 @@ struct DispatchFormView: View {
                 .scrollDismissesKeyboard(.interactively)
                 .background(Theme.background)
                 .environment(\.scrollFormTo, FormScroller { id in
-                    withAnimation(Theme.spring) { proxy.scrollTo(id, anchor: .top) }
+                    // One plain ease, none at all with Reduce Motion: a spring overshoots next to a keyboard.
+                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) { proxy.scrollTo(id, anchor: .top) }
                 })
-                .onPreferenceChange(AddressListOpenKey.self) { addressListOpen = $0 }
-                .safeAreaInset(edge: .bottom) {
-                    if !addressListOpen { saveBar(proxy: proxy) }
-                }
+                .safeAreaInset(edge: .bottom) { saveBar(proxy: proxy) }
             }
             .navigationTitle("New Call")
             #if os(iOS)

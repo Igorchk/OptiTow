@@ -16,6 +16,7 @@ struct AddressField: View {
     @State private var search = AddressSearch()
     @State private var isFocused = false
     @State private var listDismissed = false
+    @State private var focusScroll: Task<Void, Never>?
 
     private var trimmed: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
 
@@ -30,23 +31,16 @@ struct AddressField: View {
             if showsList {
                 AddressSuggestionList(suggestions: search.suggestions, typedText: trimmed,
                                       isResolving: search.isResolving, onSelect: select, onUseAsTyped: useAsTyped)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    .transition(.opacity)
             }
             status
         }
         .id(label)
-        .themeAnimation(value: showsList)
-        .themeAnimation(value: entry)
-        .preference(key: AddressListOpenKey.self, value: showsList)
+        // A short fade for the list and the status line. Layout changes land at once: a spring on
+        // every open and close moves the content under a scroll view that is being typed into.
+        .animation(.easeOut(duration: 0.12), value: showsList)
+        .animation(.easeOut(duration: 0.12), value: entry)
         .onChange(of: text) { _, new in textChanged(new) }
-        .onChange(of: showsList) { _, open in
-            guard open else { return }
-            // Let the keyboard finish rising, then bring the field and its list into view.
-            Task {
-                try? await Task.sleep(for: .milliseconds(350))
-                scrollFormTo(label)
-            }
-        }
     }
 
     @ViewBuilder
@@ -67,9 +61,20 @@ struct AddressField: View {
 
     // MARK: Events
 
+    /// The only place the form is scrolled for this field: once, when it gains focus. Typing,
+    /// deleting and new results never move the scroll position.
     private func focusChanged(_ focused: Bool) {
         isFocused = focused
-        if focused, entry == .unset { search.update(query: text) }
+        focusScroll?.cancel()
+        guard focused else { return }
+        if entry == .unset { search.update(query: text) }
+        let textAtFocus = text
+        focusScroll = Task {
+            // Let the keyboard finish rising. If typing has already begun, leave the view alone.
+            try? await Task.sleep(for: .milliseconds(350))
+            guard !Task.isCancelled, text == textAtFocus else { return }
+            scrollFormTo(label)
+        }
     }
 
     private func textChanged(_ new: String) {
@@ -112,6 +117,11 @@ struct AddressSuggestionList: View {
     let onUseAsTyped: () -> Void
 
     @ScaledMetric(relativeTo: .body) private var rowHeight = Theme.controlMinHeight
+    @Environment(\.dynamicTypeSize) private var typeSize
+
+    /// One line per row at normal sizes, so a row's height never changes as the text under it does.
+    /// At accessibility sizes truncating would hide the address, so rows wrap there.
+    private var lineLimit: Int? { typeSize.isAccessibilitySize ? nil : 1 }
 
     private var shape: RoundedRectangle {
         RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
@@ -123,8 +133,8 @@ struct AddressSuggestionList: View {
                 row(title: suggestion.title, subtitle: suggestion.subtitle, emphasized: true) { onSelect(suggestion) }
                 Theme.hairline.frame(height: 1)
             }
-            row(title: "Use “\(typedText)” as typed", subtitle: "Roadside or cross-street spot, no mileage",
-                emphasized: false, action: onUseAsTyped)
+            row(title: "Use as typed — no mileage", subtitle: typedText, emphasized: false, middleTruncate: true,
+                action: onUseAsTyped)
         }
         .background(Theme.surface, in: shape)
         .overlay(shape.strokeBorder(Theme.controlBorder, lineWidth: 1))
@@ -134,14 +144,18 @@ struct AddressSuggestionList: View {
         .overlay { if isResolving { ProgressView() } }
     }
 
-    private func row(title: String, subtitle: String, emphasized: Bool, action: @escaping () -> Void) -> some View {
+    private func row(title: String, subtitle: String, emphasized: Bool, middleTruncate: Bool = false,
+                     action: @escaping () -> Void) -> some View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.body.weight(emphasized ? .semibold : .medium))
                     .foregroundStyle(emphasized ? Theme.textPrimary : Theme.link)
+                    .lineLimit(lineLimit)
                 if !subtitle.isEmpty {
                     Text(subtitle).metadata()
+                        .lineLimit(lineLimit)
+                        .truncationMode(middleTruncate ? .middle : .tail)
                 }
             }
             .multilineTextAlignment(.leading)

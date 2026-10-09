@@ -13,10 +13,3 @@ struct FormScroller: Equatable {
 extension EnvironmentValues {
     @Entry var scrollFormTo = FormScroller { _ in }
 }
-
-/// True while an address field's suggestion list is open. The form hides its pinned Save bar then,
-/// so the list is not squeezed between the bar and the keyboard.
-struct AddressListOpenKey: PreferenceKey {
-    static let defaultValue = false
-    static func reduce(value: inout Bool, nextValue: () -> Bool) { value = value || nextValue() }
-}

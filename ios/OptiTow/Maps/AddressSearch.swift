@@ -4,7 +4,8 @@ import Observation
 
 /// One row in the suggestions list.
 struct AddressSuggestion: Identifiable {
-    let id = UUID()
+    /// Stable across result updates, so a row that is still a match is kept, not rebuilt.
+    var id: String { "\(title)|\(subtitle)" }
     let title: String
     let subtitle: String
     /// Nil only for the sample rows in previews.
@@ -15,8 +16,8 @@ struct AddressSuggestion: Identifiable {
 /// tapped suggestion into a full address plus a coordinate.
 @MainActor @Observable
 final class AddressSearch: NSObject {
-    /// At most this many rows, so the list plus the "use as typed" row fits above the keyboard.
-    static let maxSuggestions = 4
+    /// At most this many rows, so the list plus the "use as typed" row fits between the form field and the pinned Save bar.
+    static let maxSuggestions = 3
     static let debounce: Duration = .milliseconds(250)
 
     private(set) var suggestions: [AddressSuggestion] = []
@@ -109,9 +110,12 @@ extension AddressSearch: MKLocalSearchCompleterDelegate {
     }
 
     private func show(_ results: [MKLocalSearchCompletion]) {
+        var seen = Set<String>()
         suggestions = results
             .filter { California.isCaliforniaSuggestion(title: $0.title, subtitle: $0.subtitle) }
-            .prefix(Self.maxSuggestions)
             .map { AddressSuggestion(title: $0.title, subtitle: $0.subtitle, completion: $0) }
+            .filter { seen.insert($0.id).inserted }
+            .prefix(Self.maxSuggestions)
+            .map { $0 }
     }
 }
