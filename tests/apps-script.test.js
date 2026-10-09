@@ -4,7 +4,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { API_SECRET, WEBSITE_SECRET, makeContext, post, rowObj, dataRowCount } = require('./support/gas-mock');
+const { API_SECRET, WEBSITE_SECRET, makeContext, post, get, rowObj, dataRowCount } = require('./support/gas-mock');
 
 function appPayload(overrides = {}) {
   return Object.assign({
@@ -722,4 +722,161 @@ test('unknown source and malformed JSON are handled', () => {
   assert.equal(post(env, appPayload(), { source: 'bogus' }).code, 'BAD_REQUEST');
   const res = JSON.parse(env.ctx.doPost({ parameter: {}, postData: { contents: '{not json' } }).content);
   assert.equal(res.code, 'UNAUTHORIZED');
+});
+
+
+// ---------------------------------------------------------------------------
+// Customer location sharing
+// ---------------------------------------------------------------------------
+
+const LOC = 'a1b2c3d4e5f6';
+const loc = (env, action, extra = {}, auth = true) =>
+  post(env, Object.assign({ action, loc: LOC }, auth ? { token: API_SECRET } : {}, extra), { source: 'location' });
+
+test('location: app requests and checks need the API secret; the website secret is not enough', () => {
+  const env = makeContext();
+  for (const action of ['request_location', 'check_location']) {
+    assert.equal(loc(env, action, {}, false).code, 'UNAUTHORIZED', action);
+    assert.equal(loc(env, action, { token: WEBSITE_SECRET }, false).code, 'UNAUTHORIZED', action + ' (website secret)');
+    assert.equal(loc(env, action, { token: 'wrong' }, false).code, 'UNAUTHORIZED', action + ' (wrong secret)');
+  }
+  assert.equal(env.cache.size, 0, 'nothing was registered');
+});
+
+test('location: register, check pending, customer submits, app reads the address and coordinates', () => {
+  const env = makeContext();
+  assert.deepEqual(loc(env, 'request_location'), { ok: true, status: 'pending' });
+  assert.deepEqual(loc(env, 'check_location'), { ok: true, status: 'pending' });
+
+  // The customer's phone has no secret.
+  const submitted = loc(env, 'submit_location', { lat: '38.5816', lng: '-121.4944' }, false);
+  assert.deepEqual(submitted, { ok: true }, 'the public endpoint reveals nothing about the position');
+
+  assert.deepEqual(loc(env, 'check_location'), {
+    ok: true, status: 'ready', address: '38.5816 -121.4944 Mock St, Sacramento, CA 95814', lat: 38.5816, lng: -121.4944,
+  }, 'the trailing ", USA" is dropped');
+  assert.equal(env.cacheTtls.get(`loc_${LOC}`), 900, '15-minute lifetime');
+});
+
+test('location: an unregistered token cannot submit, and costs no geocoding', () => {
+  const env = makeContext();
+  const out = loc(env, 'submit_location', { lat: 38.5, lng: -121.4 }, false);
+  assert.equal(out.ok, false);
+  assert.equal(out.code, 'NOT_FOUND');
+  assert.equal(env.geocodeCalls.length, 0, 'the Maps quota is protected');
+  assert.equal(env.cache.size, 0, 'no junk cache entries');
+});
+
+test('location: the first position wins and a repeat does not re-geocode or overwrite', () => {
+  const env = makeContext();
+  loc(env, 'request_location');
+  loc(env, 'submit_location', { lat: 38.5, lng: -121.4 }, false);
+  const again = loc(env, 'submit_location', { lat: 39.9, lng: -120.1 }, false);
+  assert.deepEqual(again, { ok: true, already: true });
+  assert.equal(env.geocodeCalls.length, 1);
+  assert.equal(loc(env, 'check_location').lat, 38.5);
+});
+
+test('location: a link expires after the cache lifetime', () => {
+  const env = makeContext();
+  loc(env, 'request_location');
+  env.expireCache();
+  assert.equal(loc(env, 'submit_location', { lat: 38.5, lng: -121.4 }, false).code, 'NOT_FOUND');
+  assert.deepEqual(loc(env, 'check_location'), { ok: true, status: 'pending' });
+
+  loc(env, 'request_location');
+  loc(env, 'submit_location', { lat: 38.5, lng: -121.4 }, false);
+  env.expireCache();
+  assert.deepEqual(loc(env, 'check_location'), { ok: true, status: 'pending' }, 'a shared location is not kept past the lifetime');
+});
+
+test('location: bad tokens and coordinates are rejected before anything is stored or geocoded', () => {
+  const env = makeContext();
+  loc(env, 'request_location');
+  const bad = [
+    { lat: '', lng: '-121' }, { lat: '38', lng: '' }, { lat: 'abc', lng: '1' }, { lat: '91', lng: '1' },
+    { lat: '1', lng: '181' }, { lat: null, lng: null }, { lat: 'NaN', lng: '1' }, { lat: 'Infinity', lng: '1' },
+  ];
+  for (const b of bad) {
+    assert.equal(loc(env, 'submit_location', b, false).code, 'BAD_REQUEST', JSON.stringify(b));
+  }
+  for (const badLoc of ['', 'short', 'UPPERCASE123', 'has space!', 'x'.repeat(33), '"><script>']) {
+    for (const action of ['request_location', 'check_location']) {
+      assert.equal(loc(env, action, { loc: badLoc }).code, 'BAD_REQUEST', `${action} ${badLoc}`);
+    }
+    assert.equal(loc(env, 'submit_location', { loc: badLoc, lat: 38, lng: -121 }, false).code, 'BAD_REQUEST');
+  }
+  assert.equal(env.geocodeCalls.length, 0);
+  assert.deepEqual(loc(env, 'check_location'), { ok: true, status: 'pending' });
+});
+
+test('location: when Maps has no address, the position is still stored (address empty)', () => {
+  const env = makeContext();
+  loc(env, 'request_location');
+  loc(env, 'submit_location', { lat: 0, lng: 10 }, false); // mock: ZERO_RESULTS
+  assert.deepEqual(loc(env, 'check_location'), { ok: true, status: 'ready', address: '', lat: 0, lng: 10 });
+
+  const env2 = makeContext();
+  loc(env2, 'request_location');
+  assert.equal(loc(env2, 'submit_location', { lat: 1, lng: 10 }, false).ok, true, 'a geocoder error does not fail the customer');
+  assert.equal(loc(env2, 'check_location').address, '');
+});
+
+test('location: an unknown location action is a bad request, and the public submit exception is only for submit_location', () => {
+  const env = makeContext();
+  assert.equal(loc(env, 'wipe').code, 'BAD_REQUEST');
+  assert.equal(loc(env, 'wipe', {}, false).code, 'UNAUTHORIZED', 'unauthenticated other actions are refused');
+  // The exception does not leak to other sources.
+  const app = post(env, { action: 'submit_location', loc: LOC, lat: 1, lng: 1 }, { source: 'app' });
+  assert.equal(app.code, 'UNAUTHORIZED');
+});
+
+test('location: sharing never touches the Call Log', () => {
+  const env = makeContext();
+  const before = JSON.stringify(env.sheet.data);
+  loc(env, 'request_location');
+  loc(env, 'submit_location', { lat: 38.5, lng: -121.4 }, false);
+  loc(env, 'check_location');
+  assert.equal(JSON.stringify(env.sheet.data), before);
+});
+
+test('location: form-encoded submit (what the customer page sends) is accepted', () => {
+  const env = makeContext();
+  loc(env, 'request_location');
+  // A browser form post has no JSON body: everything arrives in e.parameter.
+  const e = { parameter: { source: 'location', action: 'submit_location', loc: LOC, lat: '38.5', lng: '-121.4' }, postData: { contents: 'action=submit_location' } };
+  assert.equal(JSON.parse(env.ctx.doPost(e).content).ok, true);
+  assert.equal(loc(env, 'check_location').status, 'ready');
+});
+
+test('landing page: a valid link serves the page with the token and endpoint, and the health check is unchanged', () => {
+  const env = makeContext();
+  assert.deepEqual(get(env), { ok: true, service: 'optitow-middleware' });
+  assert.deepEqual(get(env, { other: 'x' }), { ok: true, service: 'optitow-middleware' });
+
+  const page = get(env, { loc: LOC });
+  assert.equal(page.kind, 'html');
+  assert.equal(page.title, 'Recovery Towing');
+  assert.equal(page.meta.viewport, 'width=device-width, initial-scale=1');
+  for (const needle of [
+    'Recovery Towing', 'Share My Exact Location', 'navigator.geolocation', 'getCurrentPosition',
+    'Location received! Our driver has your exact spot.',
+    'Unable to detect location. Please tell your dispatcher your nearest cross street.',
+    'submit_location', LOC, 'http://127.0.0.1:8787/exec', 'Try Again',
+  ]) {
+    assert.ok(page.html.includes(needle), `page should contain: ${needle}`);
+  }
+  assert.ok(!page.html.includes('__CONFIG__'), 'the placeholder was replaced');
+  assert.ok(!page.html.includes(API_SECRET), 'the API secret never appears in the page');
+});
+
+test('landing page: an invalid token cannot inject script and gets a plain error page', () => {
+  const env = makeContext();
+  for (const bad of ['', 'x', '"><script>alert(1)</script>', 'a'.repeat(40), "a1b2c3d4'; alert(1); //"]) {
+    const page = get(env, { loc: bad });
+    assert.equal(page.kind, 'html');
+    assert.ok(page.html.includes('This link is not valid'), JSON.stringify(bad));
+    assert.ok(!page.html.includes('getCurrentPosition'), 'no script for an invalid link');
+    assert.ok(!page.html.includes('alert(1)'));
+  }
 });

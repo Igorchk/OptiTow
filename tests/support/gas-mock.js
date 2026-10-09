@@ -76,7 +76,9 @@ function makeContext(seed) {
     setSpreadsheetTimeZone() {},
   };
   const cache = new Map();
+  const cacheTtls = new Map();
   const mapsCalls = [];
+  const geocodeCalls = [];
   const ctx = {
     console: { log() {}, warn() {}, error: console.error },
     SpreadsheetApp: { getActiveSpreadsheet: () => ss, flush() {} },
@@ -89,8 +91,17 @@ function makeContext(seed) {
     CacheService: {
       getScriptCache: () => ({
         get: (k) => (cache.has(k) ? cache.get(k) : null),
-        put: (k, v) => cache.set(k, v),
+        put: (k, v, ttl) => { cache.set(k, v); cacheTtls.set(k, ttl); },
       }),
+    },
+    ScriptApp: { getService: () => ({ getUrl: () => 'http://127.0.0.1:8787/exec' }) },
+    HtmlService: {
+      createHtmlOutput: (html) => {
+        const out = { kind: 'html', html, title: '', meta: {} };
+        out.setTitle = (t) => { out.title = t; return out; };
+        out.addMetaTag = (n, c) => { out.meta[n] = c; return out; };
+        return out;
+      },
     },
     Utilities: {
       getUuid: () => crypto.randomUUID(),
@@ -100,6 +111,15 @@ function makeContext(seed) {
     },
     Maps: {
       DirectionFinder: { Mode: { DRIVING: 'driving' } },
+      // Deterministic fake: the address embeds the coordinates. lat 0 has no address; lat 1 throws.
+      newGeocoder: () => ({
+        reverseGeocode(lat, lng) {
+          geocodeCalls.push([lat, lng]);
+          if (lat === 1) throw new Error('geocoder quota');
+          if (lat === 0) return { status: 'ZERO_RESULTS', results: [] };
+          return { status: 'OK', results: [{ formatted_address: `${lat} ${lng} Mock St, Sacramento, CA 95814, USA` }] };
+        },
+      }),
       newDirectionFinder() {
         const q = {};
         const f = {
@@ -126,12 +146,23 @@ function makeContext(seed) {
   vm.runInContext(SOURCE, ctx);
   ctx.setup();
   if (seed) seed(sheets['Call Log']);
-  return { ctx, sheet: sheets['Call Log'], ref: sheets['Reference Data'], mapsCalls };
+  return {
+    ctx, sheet: sheets['Call Log'], ref: sheets['Reference Data'], mapsCalls,
+    cache, cacheTtls, geocodeCalls,
+    /** Simulates the 15 minutes passing. */
+    expireCache: () => cache.clear(),
+  };
 }
 
 function post(env, body, query = {}) {
   const e = { parameter: query, postData: { contents: typeof body === 'string' ? body : JSON.stringify(body) } };
   return JSON.parse(env.ctx.doPost(e).content);
+}
+
+/** doGet with query parameters. Returns parsed JSON for the health check, or the HTML output. */
+function get(env, query = {}) {
+  const out = env.ctx.doGet({ parameter: query });
+  return out.kind === 'html' ? out : JSON.parse(out.content);
 }
 
 function rowObj(env, rowNum) {
@@ -142,4 +173,4 @@ function rowObj(env, rowNum) {
 
 function dataRowCount(env) { return env.sheet.getLastRow() - 1; }
 
-module.exports = { API_SECRET, WEBSITE_SECRET, MockSheet, makeContext, post, rowObj, dataRowCount };
+module.exports = { API_SECRET, WEBSITE_SECRET, MockSheet, makeContext, post, get, rowObj, dataRowCount };

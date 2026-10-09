@@ -12,10 +12,22 @@ struct DispatchFormView: View {
     @State private var confirmClear = false
     @State private var trip = TripMileageModel()
     @State private var showQuickMileage = false
+    @State private var location = CustomerLocationService(config: AppConfig.load())
+    @State private var locationMessage: LocationMessage?
     /// Bumped after a save; the scroll view returns to the top for the next call.
     @State private var scrollTopTick = 0
 
     private let catalog = VehicleCatalog.shared
+
+    /// What goes in the text to the customer, once its link has been registered.
+    private struct LocationMessage: Identifiable {
+        let id = UUID()
+        let recipient: String
+        let link: URL
+        var body: String {
+            "Hi from Recovery Towing! Please tap this link so our driver can find your exact spot: \(link.absoluteString)"
+        }
+    }
 
     /// Whether this build has a webhook address and secret. Read once; the sync engine itself only
     /// reports a generic error when they are missing, and this screen wants a distinct state for it.
@@ -60,6 +72,16 @@ struct DispatchFormView: View {
             .overlay(alignment: .top) { savedBanner }
         }
         .sensoryFeedback(.success, trigger: savedCount)
+        .sensoryFeedback(.success, trigger: location.receivedCount)
+        .sheet(item: $locationMessage) { message in
+            locationSheet(for: message)
+        }
+        .onChange(of: location.receivedCount) { takeSharedLocation() }
+        // Typing or choosing a pickup address means the dispatcher has moved on: stop waiting, so a
+        // late answer never replaces what they entered.
+        .onChange(of: draft.pickup_address) {
+            if case .listening = location.state { location.cancel() }
+        }
         .sheet(isPresented: $showSyncDetail) {
             SyncStatusSheet(sync: sync, isConfigured: Self.isConfigured)
         }
@@ -72,7 +94,10 @@ struct DispatchFormView: View {
             Text(saveError ?? "")
         }
         .confirmationDialog("Clear this call?", isPresented: $confirmClear, titleVisibility: .visible) {
-            Button("Clear form", role: .destructive) { draft = CallDraft() }
+            Button("Clear form", role: .destructive) {
+                location.cancel()
+                draft = CallDraft()
+            }
         }
         .onChange(of: draft.caller_type) { _, newValue in
             if newValue == ChipOptions.privateCash && draft.payer_name.isEmpty {
@@ -100,6 +125,12 @@ struct DispatchFormView: View {
         FormSection(title: "Caller") {
             FieldGroup(label: "Phone") {
                 BigTextField(label: "Phone", placeholder: "916-555-0199", text: $draft.customer_phone, keyboard: .phone)
+                if location.isAvailable, draft.hasValidPhone, !isAskingForLocation {
+                    ActionPillButton(location.state == .preparing ? "Preparing link…" : "Ask for Location",
+                                     systemImage: "location.fill", kind: .secondary, fillsWidth: false,
+                                     action: askForLocation)
+                        .disabled(location.state == .preparing)
+                }
             }
             FieldGroup(label: "Caller Type") {
                 ChipGrid(options: ChipOptions.callerType, selection: $draft.caller_type)
@@ -161,6 +192,7 @@ struct DispatchFormView: View {
             FieldGroup(label: "Pickup Address") {
                 AddressField(label: "Pickup address", placeholder: "Tap to enter pickup address",
                              text: $draft.pickup_address, entry: $draft.pickup_entry)
+                LocationRequestStatus(state: location.state, onDismiss: location.cancel)
             }
             FieldGroup(label: "Dropoff Address") {
                 AddressField(label: "Dropoff address", placeholder: "Tap to enter dropoff address",
@@ -263,6 +295,55 @@ struct DispatchFormView: View {
         }
     }
 
+    // MARK: - Customer location
+
+    /// Waiting for an answer, or showing a message about the last request.
+    private var isAskingForLocation: Bool {
+        switch location.state {
+        case .listening, .timedOut, .failed: true
+        case .idle, .preparing, .received: false
+        }
+    }
+
+    /// Registers a link with the server, then opens the text message with the customer's number.
+    private func askForLocation() {
+        let digits = String(draft.phoneDigits.suffix(10))
+        Task {
+            guard let link = await location.prepareLink() else { return }
+            locationMessage = LocationMessage(recipient: digits, link: link)
+        }
+    }
+
+    @ViewBuilder
+    private func locationSheet(for message: LocationMessage) -> some View {
+        #if os(iOS)
+        if MessageComposeView.canSendText {
+            MessageComposeView(recipients: [message.recipient], body: message.body) { result in
+                locationMessage = nil
+                // Only a sent text starts the wait; cancelling throws the link away.
+                if result == .sent { location.startListening() } else { location.cancel() }
+            }
+            .ignoresSafeArea()
+        } else {
+            LocationLinkFallbackSheet(message: message.body, link: message.link) {
+                locationMessage = nil
+                location.startListening()
+            } onCancel: {
+                locationMessage = nil
+                location.cancel()
+            }
+        }
+        #endif
+    }
+
+    /// The customer shared: fill the Pickup row with the confirmed address and coordinate.
+    private func takeSharedLocation() {
+        guard let place = location.receivedPlace else { return }
+        location.acknowledgeReceived()
+        draft.pickup_address = place.address
+        draft.pickup_entry = .resolved(place)
+    }
+
     // MARK: - Actions
 
     private func save() {
@@ -274,6 +355,7 @@ struct DispatchFormView: View {
             return
         }
         dismissKeyboard()
+        location.cancel()
         draft = CallDraft()
         savedCount += 1
         scrollTopTick += 1
