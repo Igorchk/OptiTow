@@ -10,7 +10,11 @@ This app is a "dumb, offline-first data pusher" for dispatchers. It does NOT do 
 ## 3. UI/UX Rules (CRITICAL)
 - **One-Handed Dispatch:** The user is on the phone. Do NOT use native iOS scrolling picker wheels or tiny native dropdowns. 
 - **Chip Grids:** Use large, high-contrast wrap-around button grids (`LazyVGrid`) for 1-tap selections.
-- **Dark Mode:** Enforce an optimized dark theme.
+- **Light and Dark Mode:** Follow the system appearance, using Apple semantic colors for surfaces and text. Contrast is checked separately in each mode (text at least 4.5:1). The one loud color is safety yellow, reserved for "selected" and the primary action; it carries a checkmark so it never depends on color alone.
+- **Touch targets:** Chips and buttons are at least 52pt tall (Apple's minimum is 44pt) and scale with Dynamic Type. At accessibility text sizes chips go one per row and Won/Lost stack vertically.
+- **Layout and tokens:** Sections are cards on a grouped background, on an 8-point grid (`Theme.swift`: spacing 4/8/12/16/24/32/48, radii 8/14/20). All text uses Dynamic Type styles; numbers use monospaced digits.
+- **States:** The screen has no lists, so there are no empty or loading placeholders. The states that exist are the sync states (all synced, syncing, offline with calls queued, retrying, failed, setup needed), shown as a badge in the toolbar and explained, with a Retry action, in a bottom sheet.
+- **Motion and feedback:** One spring for state changes, with a quick fade instead when Reduce Motion is on. Haptics use SwiftUI's native `sensoryFeedback`.
 - **No Lookups:** Do not build search bars or historical list views.
 
 ## 4. Dependent Vehicle Selectors

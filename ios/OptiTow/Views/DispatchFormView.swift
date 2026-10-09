@@ -3,6 +3,7 @@ import SwiftUI
 /// The single screen: capture one call, save it to the offline queue, start the next.
 struct DispatchFormView: View {
     @Environment(SyncManager.self) private var sync
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     @State private var draft = CallDraft()
     @State private var savedCount = 0
@@ -13,6 +14,14 @@ struct DispatchFormView: View {
 
     private let catalog = VehicleCatalog.shared
 
+    /// Whether this build has a webhook address and secret. Read once; the sync engine itself only
+    /// reports a generic error when they are missing, and this screen wants a distinct state for it.
+    private static let isConfigured = AppConfig.load() != nil
+
+    private var syncState: SyncPresentation {
+        SyncPresentation(sync: sync, isConfigured: Self.isConfigured)
+    }
+
     var body: some View {
         NavigationStack {
             ScrollViewReader { proxy in
@@ -20,7 +29,7 @@ struct DispatchFormView: View {
                     // The scroll anchor lives outside the re-identified form so scrollTo
                     // still finds it after a save swaps the form's identity.
                     Color.clear.frame(height: 0).id("top")
-                    VStack(alignment: .leading, spacing: 32) {
+                    VStack(alignment: .leading, spacing: Theme.Spacing.md) {
                         callerSection
                         jobSection
                         vehicleSection
@@ -29,7 +38,7 @@ struct DispatchFormView: View {
                         outcomeSection
                         notesSection
                     }
-                    .padding(16)
+                    .padding(Theme.Spacing.md)
                     // New call_id => fresh child state (e.g. "Other" text fields collapse).
                     .id(draft.call_id)
                 }
@@ -45,16 +54,13 @@ struct DispatchFormView: View {
             .overlay(alignment: .top) { savedBanner }
         }
         .sensoryFeedback(.success, trigger: savedCount)
+        .sheet(isPresented: $showSyncDetail) {
+            SyncStatusSheet(sync: sync, isConfigured: Self.isConfigured)
+        }
         .alert("Couldn't save call", isPresented: Binding(get: { saveError != nil }, set: { if !$0 { saveError = nil } })) {
             Button("OK", role: .cancel) {}
         } message: {
             Text(saveError ?? "")
-        }
-        .alert("Sync status", isPresented: $showSyncDetail) {
-            Button("Retry now") { Task { await sync.drain() } }
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(syncDetail)
         }
         .confirmationDialog("Clear this call?", isPresented: $confirmClear, titleVisibility: .visible) {
             Button("Clear form", role: .destructive) { draft = CallDraft() }
@@ -81,7 +87,7 @@ struct DispatchFormView: View {
     private var callerSection: some View {
         FormSection(title: "Caller") {
             FieldGroup(label: "Phone") {
-                BigTextField(placeholder: "916-555-0199", text: $draft.customer_phone, keyboard: .phone)
+                BigTextField(label: "Phone", placeholder: "916-555-0199", text: $draft.customer_phone, keyboard: .phone)
             }
             FieldGroup(label: "Caller Type") {
                 ChipGrid(options: ChipOptions.callerType, selection: $draft.caller_type)
@@ -103,7 +109,7 @@ struct DispatchFormView: View {
     private var vehicleSection: some View {
         FormSection(title: "Vehicle") {
             FieldGroup(label: "Year") {
-                BigTextField(placeholder: "2021", text: $draft.vehicle_year, keyboard: .number)
+                BigTextField(label: "Vehicle year", placeholder: "2021", text: $draft.vehicle_year, keyboard: .number)
             }
             FieldGroup(label: "Make") {
                 ChipGridWithOther(options: catalog.entries.map(\.make), value: $draft.vehicle_make,
@@ -129,11 +135,9 @@ struct DispatchFormView: View {
                               otherPlaceholder: "Model", minChipWidth: 105)
                 .id(draft.vehicle_make)
         } else if !draft.vehicle_make.isEmpty {
-            BigTextField(placeholder: "Model", text: $draft.vehicle_model)
+            BigTextField(label: "Model", placeholder: "Model", text: $draft.vehicle_model)
         } else {
-            Text("Pick a make to see its models")
-                .font(.subheadline)
-                .foregroundStyle(Theme.textSecondary)
+            Text("Pick a make to see its models").metadata()
         }
     }
 
@@ -143,13 +147,14 @@ struct DispatchFormView: View {
                 ChipGrid(options: ChipOptions.sceneLocation, selection: $draft.scene_location)
             }
             FieldGroup(label: "Pickup Address") {
-                BigTextField(placeholder: "I-80 & Madison Ave, Sacramento", text: $draft.pickup_address)
+                BigTextField(label: "Pickup address", placeholder: "I-80 & Madison Ave, Sacramento",
+                             text: $draft.pickup_address)
             }
             FieldGroup(label: "Dropoff Address") {
-                BigTextField(placeholder: "123 Auto Body Way", text: $draft.dropoff_address)
+                BigTextField(label: "Dropoff address", placeholder: "123 Auto Body Way", text: $draft.dropoff_address)
             }
             FieldGroup(label: "Start Location") {
-                BigTextField(placeholder: "Yard", text: $draft.start_location)
+                BigTextField(label: "Start location", placeholder: "Yard", text: $draft.start_location)
             }
         }
     }
@@ -157,7 +162,8 @@ struct DispatchFormView: View {
     private var quoteSection: some View {
         FormSection(title: "Quote") {
             FieldGroup(label: "Quoted Price ($)") {
-                BigTextField(placeholder: "220.00", text: $draft.quoted_price, keyboard: .decimal)
+                BigTextField(label: "Quoted price in dollars", placeholder: "220.00",
+                             text: $draft.quoted_price, keyboard: .decimal)
             }
         }
     }
@@ -172,50 +178,37 @@ struct DispatchFormView: View {
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
-        .animation(.snappy, value: draft.isLost)
+        .themeAnimation(value: draft.isLost)
     }
 
     private var notesSection: some View {
         FormSection(title: "Notes") {
-            TextField("", text: $draft.notes_comments,
-                      prompt: Text("Anything else…").foregroundStyle(Theme.textSecondary),
-                      axis: .vertical)
-                .lineLimit(3...8)
-                .font(.body)
-                .foregroundStyle(Theme.textPrimary)
-                .padding(16)
-                .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerRadius))
-                .overlay(RoundedRectangle(cornerRadius: Theme.cornerRadius).stroke(Theme.surfaceBorder, lineWidth: 1.5))
+            NotesField(label: "Notes", placeholder: "Anything else…", text: $draft.notes_comments)
         }
     }
 
     // MARK: - Chrome
 
+    /// The Save action, pinned over a blurred bar. Its label says what is still missing.
     private func saveBar(proxy: ScrollViewProxy) -> some View {
-        Button {
+        ActionPillButton(saveLabel, systemImage: draft.canSave ? "checkmark" : nil) {
             save(proxy: proxy)
-        } label: {
-            Text(saveLabel)
-                .font(.title3.weight(.heavy))
-                .frame(maxWidth: .infinity, minHeight: 64)
-                .foregroundStyle(draft.canSave ? Color.black : Theme.textSecondary)
-                .background(draft.canSave ? Theme.selected : Theme.surface,
-                            in: RoundedRectangle(cornerRadius: Theme.cornerRadius))
         }
-        .buttonStyle(.plain)
         .disabled(!draft.canSave)
-        .opacity(draft.canSave ? 1 : 0.55)
-        .animation(.easeOut(duration: 0.15), value: draft.canSave)
-        .padding(.horizontal, 16)
-        .padding(.top, 10)
-        .padding(.bottom, 6)
-        .background(.ultraThinMaterial)
+        .padding(.horizontal, Theme.Spacing.md)
+        .padding(.vertical, Theme.Spacing.sm)
+        .background(.thinMaterial)
+        .overlay(alignment: .top) { Theme.hairline.frame(height: 1) }
+        // The bar is pinned over the form, so at the largest sizes it must not take over the screen.
+        .dynamicTypeSize(...DynamicTypeSize.accessibility2)
     }
 
     /// Says what is still missing; the phone comes first because it is the first field on the form.
+    /// Shorter at accessibility text sizes, where the full wording would wrap over several lines.
     private var saveLabel: String {
-        if !draft.hasValidPhone { return "Enter a 10-digit phone to save" }
-        if draft.outcome.isEmpty { return "Pick Won or Lost to save" }
+        let compact = typeSize.isAccessibilitySize
+        if !draft.hasValidPhone { return compact ? "Add phone" : "Enter a 10-digit phone to save" }
+        if draft.outcome.isEmpty { return compact ? "Pick Won or Lost" : "Pick Won or Lost to save" }
         return "Save Call"
     }
 
@@ -223,11 +216,17 @@ struct DispatchFormView: View {
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .cancellationAction) {
             Button("Clear") { confirmClear = true }
-                .foregroundStyle(Theme.textSecondary)
         }
         ToolbarItem(placement: .primaryAction) {
-            Button { showSyncDetail = true } label: { SyncStatusPill(sync: sync) }
-                .buttonStyle(.plain)
+            let state = syncState
+            Button { showSyncDetail = true } label: {
+                StatusBadge(title: state.badgeTitle, systemImage: state.symbol, tone: state.tone)
+                    .frame(minHeight: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(PressableButtonStyle())
+            .accessibilityLabel("Sync status: \(state.badgeTitle)")
+            .accessibilityHint("Opens sync details")
         }
         #if os(iOS)
         ToolbarItemGroup(placement: .keyboard) {
@@ -243,26 +242,14 @@ struct DispatchFormView: View {
         if showSavedBanner {
             Label("Call saved", systemImage: "checkmark.circle.fill")
                 .font(.headline)
-                .foregroundStyle(.black)
-                .padding(.horizontal, 20)
-                .padding(.vertical, 12)
+                .foregroundStyle(Theme.onFill)
+                .padding(.horizontal, Theme.Spacing.lg)
+                .padding(.vertical, Theme.Spacing.sm)
                 .background(Theme.won, in: Capsule())
-                .padding(.top, 8)
+                .cardShadow()
+                .padding(.top, Theme.Spacing.xs)
                 .transition(.move(edge: .top).combined(with: .opacity))
         }
-    }
-
-    private var syncDetail: String {
-        var lines = ["\(sync.pendingCount) call(s) waiting to sync."]
-        if sync.rejectedCount > 0 {
-            lines.append("\(sync.rejectedCount) call(s) were rejected by the server and won't retry.")
-        }
-        switch sync.status {
-        case .error(let message), .retrying(let message): lines.append(message)
-        case .offline: lines.append("No network — calls will sync automatically when it's back.")
-        case .idle, .syncing: break
-        }
-        return lines.joined(separator: "\n\n")
     }
 
     // MARK: - Actions
@@ -279,10 +266,10 @@ struct DispatchFormView: View {
         draft = CallDraft()
         savedCount += 1
         withAnimation { proxy.scrollTo("top", anchor: .top) }
-        withAnimation(.snappy) { showSavedBanner = true }
+        withAnimation(Theme.spring) { showSavedBanner = true }
         Task {
             try? await Task.sleep(for: .seconds(1.6))
-            withAnimation(.snappy) { showSavedBanner = false }
+            withAnimation(Theme.spring) { showSavedBanner = false }
         }
     }
 
@@ -292,3 +279,26 @@ struct DispatchFormView: View {
         #endif
     }
 }
+
+#if DEBUG
+import SwiftData
+
+/// The whole screen with an in-memory queue. This build has no webhook, so it also shows the
+/// "setup needed" state in the toolbar.
+private struct DispatchFormPreview: View {
+    private static let container: ModelContainer = {
+        // swiftlint:disable:next force_try
+        try! ModelContainer(for: CallRecord.self, configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+    }()
+
+    var body: some View {
+        DispatchFormView()
+            .environment(SyncManager(context: Self.container.mainContext, config: nil))
+            .modelContainer(Self.container)
+    }
+}
+
+#Preview("Dispatch · Light") { DispatchFormPreview().preferredColorScheme(.light) }
+#Preview("Dispatch · Dark") { DispatchFormPreview().preferredColorScheme(.dark) }
+#Preview("Dispatch · Large text") { DispatchFormPreview().dynamicTypeSize(.accessibility3) }
+#endif

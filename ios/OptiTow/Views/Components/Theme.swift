@@ -62,6 +62,10 @@ enum Theme {
     /// choice on all three, in both appearances.
     static let onFill = Color.black
 
+    /// Tint for text buttons in the navigation and keyboard bars: dark amber on light, yellow on dark,
+    /// because bright yellow text is unreadable on white.
+    static let link = Color(light: Color(red: 0.60, green: 0.38, blue: 0.0), dark: selected)
+
     static let won = Color(uiColor: .systemGreen)
     static let lost = Color(uiColor: .systemRed)
 
@@ -87,14 +91,6 @@ enum Theme {
             }
         }
     }
-
-    // MARK: Legacy aliases
-    // Used by screens not yet migrated to the new tokens. Deleted once the refactor is complete.
-
-    static let surfaceBorder = hairline
-    static let onSelected = onFill
-    static let chipHeight = controlMinHeight
-    static let cornerRadius = Radius.medium
 
     // MARK: Motion
 
@@ -144,5 +140,23 @@ extension View {
     /// Soft ambient elevation for cards.
     func cardShadow() -> some View {
         shadow(color: Theme.shadow, radius: 8, x: 0, y: 2)
+    }
+}
+
+// MARK: - Motion
+
+/// Animates `value` changes with the shared spring, or a quick fade when Reduce Motion is on.
+private struct ThemeAnimation<Value: Equatable>: ViewModifier {
+    let value: Value
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func body(content: Content) -> some View {
+        content.animation(reduceMotion ? Theme.reducedMotion : Theme.spring, value: value)
+    }
+}
+
+extension View {
+    func themeAnimation<Value: Equatable>(value: Value) -> some View {
+        modifier(ThemeAnimation(value: value))
     }
 }

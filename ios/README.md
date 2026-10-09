@@ -75,8 +75,8 @@ How each failure is handled:
 - **No picker wheels or dropdowns:** every choice is a large chip in a `LazyVGrid`, and tapping a selected chip clears it.
 - **Vehicle chips:** the make and model chips depend on each other. Choosing Tesla shows only Model 3, Y, S, X and Cybertruck. An **Other** chip reveals a free-text field.
 - **Outcome toggle:** a large Won/Lost toggle sits at the bottom of the form. Decline reasons appear only when the call is Lost. A call can't be saved until Won or Lost is picked.
-- **Dark theme:** enforced through `UIUserInterfaceStyle = Dark` and `.preferredColorScheme(.dark)`.
-- **No history:** there are no search bars or history lists. The sync pill shows only queue counts, and tapping it shows details and a "Retry now" button.
+- **Light and dark:** the app follows the system appearance. Colors are semantic tokens in `Theme.swift`, so both modes come from one set of definitions.
+- **No history:** there are no search bars or history lists. The toolbar badge shows the sync state (all synced, syncing, offline with calls queued, retrying, failed, or setup needed). Tapping it opens a sheet that explains the state and offers **Retry Sync**.
 - **Private Cash shortcut:** choosing **Private Cash** fills the payer with **Cash / Customer** if no payer is set yet.
 
 ## Known limits
