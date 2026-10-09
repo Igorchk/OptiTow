@@ -18,11 +18,11 @@ struct MileageCalculatorView: View {
                 VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
                     FormSection(title: "Route") {
                         FieldGroup(label: "Pickup Address") {
-                            AddressField(label: "Pickup address", placeholder: "I-80 & Madison Ave, Sacramento",
+                            AddressField(label: "Pickup address", placeholder: "Tap to enter pickup address",
                                          text: $pickupText, entry: $pickup)
                         }
                         FieldGroup(label: "Dropoff Address") {
-                            AddressField(label: "Dropoff address", placeholder: "123 Auto Body Way",
+                            AddressField(label: "Dropoff address", placeholder: "Tap to enter dropoff address",
                                          text: $dropoffText, entry: $dropoff)
                         }
                     }

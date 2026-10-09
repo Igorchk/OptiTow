@@ -159,11 +159,11 @@ struct DispatchFormView: View {
                 ChipGrid(options: ChipOptions.sceneLocation, selection: $draft.scene_location)
             }
             FieldGroup(label: "Pickup Address") {
-                AddressField(label: "Pickup address", placeholder: "I-80 & Madison Ave, Sacramento",
+                AddressField(label: "Pickup address", placeholder: "Tap to enter pickup address",
                              text: $draft.pickup_address, entry: $draft.pickup_entry)
             }
             FieldGroup(label: "Dropoff Address") {
-                AddressField(label: "Dropoff address", placeholder: "123 Auto Body Way",
+                AddressField(label: "Dropoff address", placeholder: "Tap to enter dropoff address",
                              text: $draft.dropoff_address, entry: $draft.dropoff_entry)
             }
             FieldGroup(label: "Start Location") {

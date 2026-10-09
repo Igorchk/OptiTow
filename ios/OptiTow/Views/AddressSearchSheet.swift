@@ -1,0 +1,157 @@
+import SwiftUI
+
+/// The place to type an address: a search field pinned at the top (focused as the sheet opens) and
+/// a full-height list of California suggestions beneath it, with "Use as typed" last. Tapping a
+/// suggestion resolves its full address and coordinate, hands them back and closes the sheet.
+///
+/// All typing happens here, in a screen that does nothing but search, so the keyboard never has to
+/// negotiate with the dispatch form's scroll view.
+struct AddressSearchSheet: View {
+    let title: String
+    let onPick: (String, AddressEntry) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var search = AddressSearch()
+    @State private var query: String
+    @FocusState private var fieldFocused: Bool
+    @Environment(\.dynamicTypeSize) private var typeSize
+
+    init(title: String, initialText: String, onPick: @escaping (String, AddressEntry) -> Void) {
+        self.title = title
+        self.onPick = onPick
+        _query = State(initialValue: initialText)
+    }
+
+    private var trimmed: String { query.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            results
+        }
+        .background(Theme.background)
+        .presentationDragIndicator(.visible)
+        .task {
+            search.update(query: query)
+            fieldFocused = true
+        }
+        .onChange(of: query) { _, new in search.update(query: new) }
+    }
+
+    // MARK: Pinned header
+
+    /// Field and Cancel side by side; stacked (Cancel on top, right-aligned) at accessibility sizes,
+    /// where they would otherwise fight over the width and leave the field showing a few letters.
+    private var header: some View {
+        let stacked = typeSize.isAccessibilitySize
+        let layout = stacked
+            ? AnyLayout(VStackLayout(alignment: .trailing, spacing: Theme.Spacing.xs))
+            : AnyLayout(HStackLayout(spacing: Theme.Spacing.sm))
+        return layout {
+            if stacked { cancelButton }
+            HStack(spacing: Theme.Spacing.xs) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(Theme.textSecondary)
+                    .accessibilityHidden(true)
+                TextField(title, text: $query, prompt: Text("Search address").foregroundStyle(Theme.textTertiary))
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(Theme.textPrimary)
+                    .focused($fieldFocused)
+                    .submitLabel(.search)
+                    .autocorrectionDisabled()
+                    #if os(iOS)
+                    .textInputAutocapitalization(.words)
+                    #endif
+                if !query.isEmpty {
+                    Button { query = "" } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(Theme.textSecondary)
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Clear search")
+                }
+            }
+            .padding(.leading, Theme.Spacing.md)
+            .frame(minHeight: Theme.controlMinHeight)
+            .inputSurface(isFocused: fieldFocused)
+
+            if !stacked { cancelButton }
+        }
+        .padding(.horizontal, Theme.Spacing.md)
+        .padding(.top, Theme.Spacing.lg)
+        .padding(.bottom, Theme.Spacing.sm)
+    }
+
+    private var cancelButton: some View {
+        Button("Cancel") { dismiss() }
+            .font(.body)
+            .frame(minHeight: 44)
+    }
+
+    // MARK: Results
+
+    private var results: some View {
+        List {
+            if let problem = search.problem {
+                Text(problem)
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(Theme.Tone.danger.foreground)
+                    .listRowBackground(Color.clear)
+            }
+            ForEach(search.suggestions) { suggestion in
+                Button { select(suggestion) } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(suggestion.title).font(.body.weight(.semibold)).foregroundStyle(Theme.textPrimary)
+                        if !suggestion.subtitle.isEmpty {
+                            Text(suggestion.subtitle).metadata()
+                        }
+                    }
+                    .frame(maxWidth: .infinity, minHeight: Theme.controlMinHeight - Theme.Spacing.md, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .listRowBackground(Theme.surface)
+            }
+            if trimmed.count >= 2 {
+                Button(action: useAsTyped) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Use as typed — no mileage").font(.body.weight(.semibold)).foregroundStyle(Theme.link)
+                        Text(trimmed).metadata().lineLimit(1).truncationMode(.middle)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: Theme.controlMinHeight - Theme.Spacing.md, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .listRowBackground(Theme.surface)
+            }
+        }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .scrollDismissesKeyboard(.interactively)
+        .overlay {
+            if search.isResolving { ProgressView().controlSize(.large) }
+        }
+        .disabled(search.isResolving)
+    }
+
+    // MARK: Actions
+
+    private func select(_ suggestion: AddressSuggestion) {
+        Task {
+            guard let place = await search.resolve(suggestion) else { return }
+            onPick(place.address, .resolved(place))
+            dismiss()
+        }
+    }
+
+    private func useAsTyped() {
+        onPick(trimmed, .manual(trimmed))
+        dismiss()
+    }
+}
+
+#if DEBUG
+#Preview("Address search · Light") { AddressSearchSheet(title: "Pickup address", initialText: "") { _, _ in }.preferredColorScheme(.light) }
+#Preview("Address search · Dark") { AddressSearchSheet(title: "Pickup address", initialText: "") { _, _ in }.preferredColorScheme(.dark) }
+#Preview("Address search · Large text") { AddressSearchSheet(title: "Pickup address", initialText: "") { _, _ in }.dynamicTypeSize(.accessibility3) }
+#endif

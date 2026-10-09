@@ -16,8 +16,8 @@ struct AddressSuggestion: Identifiable {
 /// tapped suggestion into a full address plus a coordinate.
 @MainActor @Observable
 final class AddressSearch: NSObject {
-    /// At most this many rows, so the list plus the "use as typed" row fits between the form field and the pinned Save bar.
-    static let maxSuggestions = 3
+    /// At most this many suggestion rows; the "use as typed" row comes after them.
+    static let maxSuggestions = 6
     static let debounce: Duration = .milliseconds(250)
 
     private(set) var suggestions: [AddressSuggestion] = []
