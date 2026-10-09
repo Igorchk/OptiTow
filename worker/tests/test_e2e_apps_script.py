@@ -70,7 +70,8 @@ def rows(base):
 def scripted_llm(messages):
     """Answers with exactly the keys the prompt asks for, like a well-behaved model."""
     keys = re.search(r"exactly these keys: ([a-z_, ]+)\.", messages[0]["content"]).group(1).split(", ")
-    full = {"caller_tone": "Stressed", "mentioned_damage": ["flat tire"], "lead_source": "Google Maps / Organic"}
+    full = {"call_intent": "NEW_LEAD", "admin_summary": None, "caller_tone": "Stressed",
+            "mentioned_damage": ["flat tire"], "lead_source": "Google Maps / Organic"}
     return json.dumps({k: full[k] for k in keys})
 
 
@@ -94,7 +95,7 @@ class ForbiddenFetcher:
         raise AssertionError("audio must not be downloaded for this call")
 
 
-def make_deps(base, tmp_path, transcript=None, fetcher=None, llm_allowed=True):
+def make_deps(base, tmp_path, transcript=None, fetcher=None, llm_allowed=True, generate=None):
     @contextlib.contextmanager
     def whisper():
         yield SpeechModel() if transcript is None else SpeechModel(transcript)
@@ -103,7 +104,7 @@ def make_deps(base, tmp_path, transcript=None, fetcher=None, llm_allowed=True):
     def llm():
         if not llm_allowed:
             raise AssertionError("the LLM must not be loaded for this call")
-        yield Enricher(scripted_llm)
+        yield Enricher(generate or scripted_llm)
 
     return Deps(
         webhook=WebhookClient(f"{base}/exec", SECRET, httpx.Client(follow_redirects=True)),
@@ -291,3 +292,56 @@ def test_an_old_call_is_never_retired_when_the_account_check_fails(server, tmp_p
     entry = next(iter(json.loads((tmp_path / "state.json").read_text()).values()))
     assert entry["failures"] == 1 and "account check failed" in entry["last_error"]
     assert FAKE_ACCOUNT not in entry["last_error"]
+
+
+# --- call intent: the three kinds of call, end to end ---------------------------------------------
+
+
+def run_one(server, tmp_path, n, transcript):
+    """Create one CallRail row, run the real batch on it with a scripted model, return (summary, row)."""
+    from transcripts import ANSWERS
+
+    def generate(messages):
+        keys = re.search(r"exactly these keys: ([a-z_, ]+)\.", messages[0]["content"]).group(1).split(", ")
+        return json.dumps({k: ANSWERS[transcript][k] for k in keys})
+
+    callrail(server, n, source="Google Ads")
+    summary = run_batch(CFG, make_deps(server, tmp_path, transcript=transcript, generate=generate))
+    return summary, rows(server)[f"https://media.example.com/rec{n}.mp3"]
+
+
+def test_a_flatbed_quote_is_a_new_lead_a_delivery_check_and_a_gate_hours_call_are_not(server, tmp_path):
+    from transcripts import ADJUSTER_STATUS, INSURANCE_QUOTE, STORAGE_HOURS
+
+    s1, lead = run_one(server, tmp_path, 1, INSURANCE_QUOTE)
+    assert (s1.updated, s1.operational, s1.not_conversation) == (1, 0, 0)
+    assert lead["Call_Intent"] == "NEW_LEAD" and lead["Admin_Summary"] == ""
+    assert lead["Caller_Tone"] == "Cooperative" and lead["Mentioned_Damage"] == "front bumper pushed in, not driveable"
+    assert lead["Lead_Source"] == "Google Ads", "CallRail attribution untouched"
+
+    s2, status = run_one(server, tmp_path, 2, ADJUSTER_STATUS)
+    assert (s2.updated, s2.operational, s2.not_conversation) == (1, 1, 0)
+    assert status["Call_Intent"] == "STATUS_CHECK"
+    assert status["Admin_Summary"].startswith("Copart rep checking delivery")
+    assert (status["Caller_Tone"], status["Mentioned_Damage"]) == ("N/A", "N/A")
+    assert status["AI_Processed_At"], "it leaves the queue"
+
+    s3, admin = run_one(server, tmp_path, 3, STORAGE_HOURS)
+    assert (s3.updated, s3.operational) == (1, 1)
+    assert admin["Call_Intent"] == "ADMIN_INQUIRY" and "storage gate hours" in admin["Admin_Summary"]
+    assert (admin["Caller_Tone"], admin["Mentioned_Damage"]) == ("N/A", "N/A")
+
+    # Dispatcher columns are untouched on every row, and nothing is queued again.
+    for row in (lead, status, admin):
+        assert row["Outcome"] == "" and row["Quoted_Price"] == "" and row["Notes_Comments"] == ""
+    assert run_batch(CFG, make_deps(server, tmp_path, llm_allowed=False)).pending == 0
+
+
+def test_the_conversion_filter_a_sheet_user_would_apply_separates_leads_from_check_ins(server, tmp_path):
+    from transcripts import ADJUSTER_STATUS, INSURANCE_QUOTE, STORAGE_HOURS
+
+    for n, transcript in enumerate((INSURANCE_QUOTE, ADJUSTER_STATUS, STORAGE_HOURS), start=1):
+        run_one(server, tmp_path, n, transcript)
+    everything = list(rows(server).values())
+    sales = [r for r in everything if r["Call_Intent"] == "NEW_LEAD"]
+    assert len(everything) == 3 and len(sales) == 1

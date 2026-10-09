@@ -47,6 +47,9 @@ class PendingCall:
     customer_phone: str = ""
     date_time: str = ""
     call_duration_sec: float | None = None
+    # None means the Apps Script is an older version that does not know about call intent: the
+    # worker then never asks for it. "" means the cell exists and is blank.
+    call_intent: str | None = None
 
     @classmethod
     def from_json(cls, raw: dict) -> "PendingCall":
@@ -60,6 +63,7 @@ class PendingCall:
             customer_phone=text("customer_phone"),
             date_time=text("date_time"),
             call_duration_sec=raw.get("call_duration_sec"),
+            call_intent=text("call_intent") if "call_intent" in raw else None,
         )
 
     def minutes_since_call_ended(self, now: datetime) -> float | None:
@@ -86,6 +90,9 @@ class PendingCall:
             blanks.append("mentioned_damage")
         if not self.lead_source.strip():
             blanks.append("lead_source")
+        if self.call_intent is not None and not self.call_intent.strip():
+            # The summary is only ever written together with the intent.
+            blanks += ["call_intent", "admin_summary"]
         return blanks
 
 

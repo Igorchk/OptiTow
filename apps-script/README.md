@@ -10,7 +10,7 @@
    - `WEBSITE_SECRET`: a *different* random string. It is visible in public page code and can only create website leads.
 3. Select `setup` in the editor and **Run** it (authorize when prompted). It does the following:
    - Sets the spreadsheet time zone to `America/Los_Angeles`.
-   - Writes the 29 headers if the Call Log is empty, or checks them if it isn't. Columns are found by header name, so a sheet in an older order still works as long as every header exists.
+   - Writes the 31 headers if the Call Log is empty, or checks them if it isn't. Columns are found by header name, so a sheet in an older order still works as long as every header exists.
    - Freezes the header row and applies column formats.
    - Rewrites the **Reference Data** tab from `ENUMS`, adding `Website Form`.
 4. **Deploy → New deployment → Web app**, with *Execute as: Me* and *Who has access: Anyone*. Copy the `/exec` URL.
@@ -115,15 +115,17 @@ Such a row gets `Caller_Tone = N/A`, `Mentioned_Damage = N/A` and `AI_Processed_
 List rows that have a recording but no `AI_Processed_At` yet:
 ```json
 { "token": "…", "action": "pending", "limit": 25 }
-→ { "ok": true, "count": 1, "items": [{ "call_id", "date_time", "customer_phone", "call_duration_sec", "call_recording_url", "lead_source", "caller_tone", "mentioned_damage" }] }
+→ { "ok": true, "count": 1, "items": [{ "call_id", "date_time", "customer_phone", "call_duration_sec", "call_recording_url", "lead_source", "caller_tone", "mentioned_damage", "call_intent" }] }
 ```
 Write results:
 ```json
 { "token": "…", "action": "update", "call_id": "…", "call_recording_url": "…",
-  "caller_tone": "Stressed", "mentioned_damage": ["front bumper"], "lead_source": "Repeat / Direct" }
+  "caller_tone": "Stressed", "mentioned_damage": ["front bumper"], "lead_source": "Repeat / Direct",
+  "call_intent": "NEW_LEAD" }
 ```
-- **Columns written:** only `Caller_Tone`, `Mentioned_Damage`, `Lead_Source` and `AI_Processed_At` (set to server time). Any other keys are ignored. Arrays for `mentioned_damage` are stored comma-joined.
-- **At least one of `caller_tone`, `mentioned_damage`, `lead_source` or `"mark_processed": true` is required.** `mark_processed` only sets `AI_Processed_At`. It retires a row whose AI cells were all filled by hand.
+For a status check: `{ "call_intent": "STATUS_CHECK", "admin_summary": "Adjuster checking delivery status.", "caller_tone": "N/A", "mentioned_damage": "N/A" }`.
+- **Columns written:** only `Caller_Tone`, `Mentioned_Damage`, `Lead_Source`, `Call_Intent`, `Admin_Summary` and `AI_Processed_At` (set to server time). `Call_Intent` must be `NEW_LEAD`, `STATUS_CHECK` or `ADMIN_INQUIRY`; `Admin_Summary` is stored only when the row's intent is `STATUS_CHECK` or `ADMIN_INQUIRY` (otherwise ignored with a warning) and is capped at 300 characters. `pending` items carry `call_intent` so the worker knows whether to classify. Any other keys are ignored. Arrays for `mentioned_damage` are stored comma-joined.
+- **At least one of `caller_tone`, `mentioned_damage`, `lead_source`, `call_intent`, `admin_summary` or `"mark_processed": true` is required.** `mark_processed` only sets `AI_Processed_At`. It retires a row whose AI cells were all filled by hand.
 - **Fill-only-if-blank.** Each of the three cells is written only if it is currently empty (an existing value is ignored and reported in `warnings`). The `pending` items carry the current `caller_tone`, `mentioned_damage` and `lead_source`, so a worker only asks the model for the blanks. To re-run a row, clear those cells first.
 - **Picklists.** `caller_tone` must be one of `Calm`, `Stressed`, `Frustrated`, `Angry`, `Confused`, `Rushed`, `Price Shopping`, `Cooperative`, `N/A`. `lead_source` must be one of the six `Lead_Source` values. Anything else is ignored with a warning, and the request still succeeds.
 - **Send `call_recording_url` too.** If the iOS app claims a CallRail row while the worker is processing it, that row's `call_id` changes, and the recording URL is how the update still finds it.
