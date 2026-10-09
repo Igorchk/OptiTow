@@ -48,6 +48,11 @@ STATE_PATH = HERE / "state.json"
 # crowd newer calls out of each batch.
 MAX_FAILURES = 3
 
+# CallRail finishes a recording a little after the call ends, so for a while an answer of "no longer
+# available" means "not yet". A call that ended less than this many minutes ago is left for a later
+# run, without counting a failure; an older one is judged as usual.
+RECORDING_GRACE_MINUTES = 30
+
 log = logging.getLogger("worker")
 
 
@@ -197,6 +202,7 @@ class Deps:
     state: FailureState
     transcriber: Callable[[], ContextManager[Transcriber]]
     enricher: Callable[[], ContextManager[Enriching]]
+    clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)  # replaced in tests
 
 
 @dataclass
@@ -207,13 +213,15 @@ class Summary:
     skipped: int = 0
     not_conversation: int = 0  # unanswered, dropped or automated: recorded as N/A, no LLM used
     unavailable: int = 0  # CallRail no longer has the call: row retired, AI cells left blank
+    deferred: int = 0  # call too recent for its recording to be ready: left alone, retried next run
     stopped_early: str | None = None
     results: list[tuple[str, dict]] = field(default_factory=list)  # (call_id, fields) in dry-run
 
     def line(self) -> str:
         extra = f", stopped early: {self.stopped_early}" if self.stopped_early else ""
         return (f"pending={self.pending} parked={self.parked} updated={self.updated} "
-                f"not_conversation={self.not_conversation} unavailable={self.unavailable} skipped={self.skipped}{extra}")
+                f"not_conversation={self.not_conversation} unavailable={self.unavailable} "
+                f"deferred={self.deferred} skipped={self.skipped}{extra}")
 
 
 def run_batch(cfg: Config, deps: Deps, *, dry_run: bool = False) -> Summary:
@@ -266,6 +274,27 @@ def run_batch(cfg: Config, deps: Deps, *, dry_run: bool = False) -> Summary:
         summary.updated += 1
         return True
 
+    def retire_unavailable(call: PendingCall, exc: RecordingUnavailable) -> bool:
+        """CallRail says the recording is gone. Wait if the call is recent; otherwise confirm the
+        account and retire the row with its AI cells blank. Returns False only if the run must stop."""
+        age = call.minutes_since_call_ended(deps.clock())
+        if age is not None and age < RECORDING_GRACE_MINUTES:
+            summary.deferred += 1
+            log.info("Recording not ready for %s: call ended %.0f min ago, inside the %d min grace period. "
+                     "Will retry on a later run (CallRail said: %s)",
+                     call.call_id, max(age, 0), RECORDING_GRACE_MINUTES, exc)
+            return True
+        try:
+            deps.fetcher.verify_account()
+        except FetchError as err:  # cannot tell "the call is gone" from "our setup is wrong"
+            fail(call, f"audio download failed: {exc}; {err}")
+            return True
+        # Not junk and not a failure: the call is gone from CallRail. Stamp the row processed so it
+        # stops coming back, and leave every AI cell blank.
+        log.warning("Recording unavailable for %s (%s): retiring the row, AI cells left blank", call.call_id, exc)
+        summary.unavailable += 1
+        return push(call, {"mark_processed": True})
+
     # Phase 0: rows that need no audio and no model.
     #  * every AI cell already filled by hand: just retire the row;
     #  * the call was too short to be a conversation (total duration includes ringing, so a short
@@ -299,12 +328,7 @@ def run_batch(cfg: Config, deps: Deps, *, dry_run: bool = False) -> Summary:
                         audio = deps.fetcher.fetch(call.call_recording_url, tmp_dir, stem=deps.state.key(call))
                         text = transcriber.transcribe(audio)
                     except RecordingUnavailable as exc:
-                        # Not junk and not a failure: the call is gone from CallRail. Stamp the row
-                        # processed so it stops coming back, and leave every AI cell blank.
-                        log.warning("Recording unavailable for %s (%s): retiring the row, AI cells left blank",
-                                    call.call_id, exc)
-                        summary.unavailable += 1
-                        if not push(call, {"mark_processed": True}):
+                        if not retire_unavailable(call, exc):
                             return summary
                         continue
                     except FetchError as exc:

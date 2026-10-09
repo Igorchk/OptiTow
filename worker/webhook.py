@@ -11,6 +11,7 @@ import logging
 import mimetypes
 import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
@@ -60,6 +61,21 @@ class PendingCall:
             date_time=text("date_time"),
             call_duration_sec=raw.get("call_duration_sec"),
         )
+
+    def minutes_since_call_ended(self, now: datetime) -> float | None:
+        """Minutes since the call ended (its start plus its duration), or None if the start is unknown.
+
+        A recording only exists once the call is over, so the clock that matters for "is the audio
+        ready yet" starts at the end, not at the start of a long call.
+        """
+        try:
+            started = datetime.fromisoformat(self.date_time.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        ended = started + timedelta(seconds=max(self.call_duration_sec or 0, 0))
+        return (now - ended).total_seconds() / 60
 
     def blank_fields(self) -> list[str]:
         """Which AI cells are still empty (and so may be filled)."""
@@ -135,13 +151,38 @@ class FetchError(Exception):
 
 
 class RecordingUnavailable(FetchError):
-    """CallRail confirmed (with a verified account) that this call and its recording no longer exist.
+    """CallRail answered "This call is no longer available." for this recording.
 
-    Retrying can never help, so the batch retires the row instead of counting a failure.
+    On its own this is only a claim: a call that ended minutes ago may just not have its audio
+    yet, and a wrong account id or key can produce the same answer. The batch decides from the call's
+    age and `AudioFetcher.verify_account()` whether to wait, retire the row, or count a failure.
     """
 
 
 _UNAVAILABLE_MESSAGE = "no longer available"
+
+
+def describe_json(data: object, account_id: str = "") -> str:
+    """What an unexpected CallRail JSON reply looked like, safe to log.
+
+    Lists the top-level field names with their types (never their values, which could be URLs, ids
+    or personal data), plus CallRail's own `error`/`message` text with URLs and the account id removed
+    and the length capped. One log line is then enough to see a renamed or missing field.
+    """
+    if not isinstance(data, dict):
+        return f"a JSON {type(data).__name__}, not an object"
+    fields = ", ".join(f"{name}:{'null' if value is None else type(value).__name__}"
+                       for name, value in sorted(data.items(), key=lambda item: str(item[0]))) or "none"
+    parts = [f"fields: {fields}"]
+    for key in ("error", "message"):
+        text = data.get(key)
+        if isinstance(text, str) and text.strip():
+            text = re.sub(r"https?://\S+", "<url>", text)
+            if account_id:
+                text = text.replace(account_id, "<account>")
+            text = re.sub(r"\s+", " ", text).strip()[:100]
+            parts.append(f'{key}: "{text}"')
+    return "; ".join(parts)
 
 
 CALLRAIL_API_HOST = "api.callrail.com"
@@ -244,10 +285,10 @@ class AudioFetcher:
                     media_url = body.get("url") if isinstance(body, dict) else None
                     if not media_url:
                         error = str(body.get("error", "")) if isinstance(body, dict) else ""
+                        shape = describe_json(body, self._account_id)
                         if parts.hostname == CALLRAIL_API_HOST and _UNAVAILABLE_MESSAGE in error.lower():
-                            self._verify_account()
-                            raise RecordingUnavailable(error.strip() or "call no longer available")
-                        raise FetchError("recording JSON had no 'url'")
+                            raise RecordingUnavailable(f"CallRail says the call is no longer available ({shape})")
+                        raise FetchError(f"recording reply had no 'url' ({shape})")
                     current = urljoin(current, str(media_url))
                     continue
                 return self._save(response, content_type, parts.path, dest_dir, stem)
@@ -255,11 +296,12 @@ class AudioFetcher:
                 response.close()
         raise FetchError("too many redirects fetching audio")
 
-    def _verify_account(self) -> None:
+    def verify_account(self) -> None:
         """Prove the key and account id are good, so "no longer available" means the call, not our setup.
 
         CallRail answers that message with HTTP 200, so a wrong account could look the same. Checked
-        once per run; any failure is an ordinary (retried) FetchError, never an orphan verdict.
+        once per run, and only when a row is about to be retired; any failure is an ordinary
+        (retried) FetchError, never an orphan verdict.
         """
         if self._account_verified:
             return

@@ -1,6 +1,7 @@
 import contextlib
 import json
 import logging
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -15,9 +16,18 @@ CFG = Config(callrail_api_key="k", webhook_url="https://script.google.com/x/exec
 LONG = "Hi, my car has a flat tire and the front bumper is dented. I found you on Google Maps."
 
 
-def call(n=1, tone="", damage="", lead="", dur=None):
+NOW = datetime(2026, 10, 2, 22, 0, 0, tzinfo=timezone.utc)
+
+
+def call(n=1, tone="", damage="", lead="", dur=None, ended_min_ago=None):
+    """`ended_min_ago` gives the call a start time such that it ended that long before NOW."""
+    date_time = ""
+    if ended_min_ago is not None:
+        started = NOW - timedelta(minutes=ended_min_ago) - timedelta(seconds=dur or 0)
+        date_time = started.strftime("%Y-%m-%dT%H:%M:%SZ")
     return PendingCall(call_id=f"c{n}", call_recording_url=f"https://media.example.com/r{n}.mp3?key=SECRET",
-                       caller_tone=tone, mentioned_damage=damage, lead_source=lead, call_duration_sec=dur)
+                       caller_tone=tone, mentioned_damage=damage, lead_source=lead, call_duration_sec=dur,
+                       date_time=date_time)
 
 
 class FakeWebhook:
@@ -39,8 +49,14 @@ class FakeWebhook:
 
 
 class FakeFetcher:
-    def __init__(self, errors=None):
+    def __init__(self, errors=None, account_ok=True):
         self.errors, self.fetched = errors or {}, []
+        self.account_ok, self.account_checks = account_ok, 0
+
+    def verify_account(self):
+        self.account_checks += 1
+        if not self.account_ok:
+            raise FetchError("call unavailable, but the CallRail account check failed (key or account id wrong?)")
 
     def fetch(self, url, dest, stem="call"):
         self.fetched.append(url)
@@ -76,7 +92,7 @@ class FakeEnricher:
         return model_for(fields).model_validate({k: v for k, v in self.answer.items() if k in fields})
 
 
-def deps(tmp_path, items, *, webhook=None, fetcher=None, transcriber=None, enricher=None):
+def deps(tmp_path, items, *, webhook=None, fetcher=None, transcriber=None, enricher=None, now=NOW):
     events = []
 
     @contextlib.contextmanager
@@ -92,7 +108,8 @@ def deps(tmp_path, items, *, webhook=None, fetcher=None, transcriber=None, enric
         events.append("llm released")
 
     d = Deps(webhook=webhook or FakeWebhook(items), fetcher=fetcher or FakeFetcher(),
-             state=FailureState(tmp_path / "state.json"), transcriber=tctx, enricher=ectx)
+             state=FailureState(tmp_path / "state.json"), transcriber=tctx, enricher=ectx,
+             clock=lambda: now)
     d.events = events
     return d
 
@@ -410,24 +427,107 @@ def test_verbose_mode_silences_network_library_debug_logs():
         logging.getLogger().setLevel(logging.WARNING)
 
 
-# --- calls CallRail no longer has: retired, not junk, not failed ---------------------------------
+# --- calls CallRail says it no longer has: wait if recent, otherwise retire (not junk, not failed) ----
+
+GONE_MSG = "This call is no longer available."
+
+
+def gone(*recordings):
+    return {r: RecordingUnavailable(GONE_MSG) for r in recordings}
 
 
 def test_unavailable_recording_is_retired_without_touching_ai_cells_or_state(tmp_path):
-    gone = {"r1": RecordingUnavailable("This call is no longer available.")}
-    d = deps(tmp_path, [call(1), call(2)], fetcher=FakeFetcher(errors=gone))
+    d = deps(tmp_path, [call(1, ended_min_ago=120), call(2)], fetcher=FakeFetcher(errors=gone("r1")))
     summary = run_batch(CFG, d)
     assert d.webhook.updates[0] == ("c1", {"mark_processed": True}), "stamped processed, no N/A written"
     assert [u[0] for u in d.webhook.updates] == ["c1", "c2"], "other rows still enrich"
-    assert summary.unavailable == 1 and summary.not_conversation == 0 and summary.skipped == 0
+    assert summary.unavailable == 1 and summary.deferred == 0 and summary.not_conversation == 0 and summary.skipped == 0
     assert not d.state.is_parked(call(1)) and d.state._data == {}, "never counted as a failure"
+    assert d.fetcher.account_checks == 1, "the account is confirmed before a row is retired"
+
+
+def test_a_call_with_no_readable_start_time_is_judged_as_before_not_deferred(tmp_path):
+    d = deps(tmp_path, [call(1)], fetcher=FakeFetcher(errors=gone("r1")))  # no date_time at all
+    summary = run_batch(CFG, d)
+    assert summary.unavailable == 1 and summary.deferred == 0
+    assert d.webhook.updates == [("c1", {"mark_processed": True})]
 
 
 def test_unavailable_recording_dry_run_writes_nothing(tmp_path):
-    gone = {"r1": RecordingUnavailable("gone")}
-    d = deps(tmp_path, [call(1)], fetcher=FakeFetcher(errors=gone))
+    d = deps(tmp_path, [call(1, ended_min_ago=120)], fetcher=FakeFetcher(errors=gone("r1")))
     summary = run_batch(CFG, d, dry_run=True)
     assert d.webhook.updates == [] and summary.results == [("c1", {"mark_processed": True})]
+
+
+def test_a_call_inside_the_grace_period_is_deferred_not_retired_or_failed(tmp_path, caplog):
+    d = deps(tmp_path, [call(1, ended_min_ago=5), call(2)], fetcher=FakeFetcher(errors=gone("r1")))
+    with caplog.at_level(logging.INFO, logger="worker"):
+        summary = run_batch(CFG, d)
+    assert [u[0] for u in d.webhook.updates] == ["c2"], "nothing is written for the young call; others still enrich"
+    assert (summary.deferred, summary.unavailable, summary.skipped, summary.not_conversation) == (1, 0, 0, 0)
+    assert d.state._data == {}, "no failure recorded"
+    assert d.fetcher.account_checks == 0, "no account request for a call that is simply too new"
+    text = caplog.text
+    assert "c1" in text and "grace period" in text and "ended 5 min ago" in text and "30 min" in text
+    assert "deferred=1" in summary.line()
+    assert "SECRET" not in text, "recording URLs and their keys stay out of the log"
+
+
+def test_a_deferred_call_is_never_parked_however_many_runs_defer_it(tmp_path):
+    d = deps(tmp_path, [call(1, ended_min_ago=5)], fetcher=FakeFetcher(errors=gone("r1")))
+    for _ in range(main.MAX_FAILURES + 3):
+        summary = run_batch(CFG, d)
+        assert (summary.deferred, summary.parked, summary.skipped) == (1, 0, 0)
+    assert d.state._data == {} and not d.state.is_parked(call(1)) and d.webhook.updates == []
+
+
+def test_the_grace_period_is_thirty_minutes_and_ends_exactly_there(tmp_path):
+    assert main.RECORDING_GRACE_MINUTES == 30
+    just_inside = deps(tmp_path, [call(1, ended_min_ago=29.9)], fetcher=FakeFetcher(errors=gone("r1")))
+    assert run_batch(CFG, just_inside).deferred == 1 and just_inside.webhook.updates == []
+
+    at_the_limit = deps(tmp_path, [call(1, ended_min_ago=30)], fetcher=FakeFetcher(errors=gone("r1")))
+    summary = run_batch(CFG, at_the_limit)
+    assert (summary.unavailable, summary.deferred) == (1, 0)
+    assert at_the_limit.webhook.updates == [("c1", {"mark_processed": True})]
+
+
+def test_the_grace_period_is_measured_from_the_end_of_the_call(tmp_path):
+    # Started 40 minutes ago and lasted 20: it ended 20 minutes ago, so still inside the grace period.
+    d = deps(tmp_path, [call(1, dur=1200, ended_min_ago=20)], fetcher=FakeFetcher(errors=gone("r1")))
+    assert run_batch(CFG, d).deferred == 1
+
+
+def test_a_deferred_call_is_retired_once_it_ages_past_the_grace_period(tmp_path):
+    items = [call(1, ended_min_ago=10)]
+    fetcher = FakeFetcher(errors=gone("r1"))
+    first = deps(tmp_path, items, fetcher=fetcher)
+    assert run_batch(CFG, first).deferred == 1 and first.webhook.updates == []
+
+    later = deps(tmp_path, items, fetcher=fetcher, now=NOW + timedelta(minutes=25))  # call now 35 min old
+    summary = run_batch(CFG, later)
+    assert (summary.unavailable, summary.deferred) == (1, 0)
+    assert later.webhook.updates == [("c1", {"mark_processed": True})]
+
+
+def test_an_old_call_whose_account_cannot_be_confirmed_is_an_ordinary_retried_failure(tmp_path):
+    d = deps(tmp_path, [call(1, ended_min_ago=120)], fetcher=FakeFetcher(errors=gone("r1"), account_ok=False))
+    summary = run_batch(CFG, d)
+    assert d.webhook.updates == [], "never retired on an unconfirmed account"
+    assert (summary.skipped, summary.unavailable, summary.deferred) == (1, 0, 0)
+    assert list(d.state._data.values())[0]["failures"] == 1, "counts toward parking, as any failure does"
+
+
+def test_deferral_covers_only_unavailable_recordings_other_fetch_errors_still_count(tmp_path):
+    d = deps(tmp_path, [call(1, ended_min_ago=5)], fetcher=FakeFetcher(errors={"r1": FetchError("HTTP 500")}))
+    summary = run_batch(CFG, d)
+    assert (summary.skipped, summary.deferred) == (1, 0)
+
+
+def test_deferred_call_dry_run_reports_nothing_and_writes_nothing(tmp_path):
+    d = deps(tmp_path, [call(1, ended_min_ago=5)], fetcher=FakeFetcher(errors=gone("r1")))
+    summary = run_batch(CFG, d, dry_run=True)
+    assert d.webhook.updates == [] and summary.results == [] and summary.deferred == 1
 
 
 def test_audio_is_deleted_right_after_each_row_even_when_transcription_crashes(tmp_path):

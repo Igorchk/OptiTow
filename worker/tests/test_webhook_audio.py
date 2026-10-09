@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 
 import httpx
 import pytest
@@ -12,6 +13,7 @@ from webhook import (
     WebhookFatal,
     WebhookRejected,
     WebhookTransient,
+    describe_json,
     is_callrail_host,
     redact,
 )
@@ -307,34 +309,38 @@ def test_http_errors_from_the_api_endpoint_do_not_leak_the_account_number(tmp_pa
 GONE = {"error": "This call is no longer available."}
 
 
-def test_a_vanished_call_is_recording_unavailable_once_the_account_checks_out(tmp_path):
+def test_a_vanished_call_is_reported_as_unavailable_without_checking_the_account(tmp_path):
     seen = []
 
     def handler(request):
         seen.append(str(request.url))
-        if request.url.path.endswith("recording.json"):
-            return httpx.Response(200, json=GONE)
+        return httpx.Response(200, json=GONE)
+
+    with pytest.raises(RecordingUnavailable) as err:
+        api_fetcher(handler).fetch(APP_LINK, tmp_path)
+    assert seen == [API_LINK], "no account request: the caller decides whether the call is old enough to judge"
+    assert "no longer available" in str(err.value) and ACCOUNT not in str(err.value)
+
+
+def test_verify_account_passes_once_and_is_remembered(tmp_path):
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
         return httpx.Response(200, json={"id": "ACC1", "numeric_id": int(ACCOUNT)})
 
     f = api_fetcher(handler)
-    with pytest.raises(RecordingUnavailable):
-        f.fetch(APP_LINK, tmp_path)
-    assert seen[-1] == f"https://api.callrail.com/v3/a/{ACCOUNT}.json"
-    with pytest.raises(RecordingUnavailable):
-        f.fetch(APP_LINK, tmp_path)
-    assert sum(u.endswith(f"{ACCOUNT}.json") for u in seen) == 1, "the account is verified once per run"
+    f.verify_account()
+    f.verify_account()
+    assert seen == [f"https://api.callrail.com/v3/a/{ACCOUNT}.json"], "the account is verified once per run"
 
 
-def test_unavailable_with_a_bad_account_is_an_ordinary_retried_failure(tmp_path):
-    def handler(request):
-        if request.url.path.endswith("recording.json"):
-            return httpx.Response(200, json=GONE)
-        return httpx.Response(404, json={"error": "Not found"})
-
+def test_verify_account_with_a_bad_account_is_an_ordinary_retried_failure():
+    handler = lambda request: httpx.Response(404, json={"error": "Not found"})  # noqa: E731
     with pytest.raises(FetchError) as err:
-        api_fetcher(handler).fetch(APP_LINK, tmp_path)
+        api_fetcher(handler).verify_account()
     assert not isinstance(err.value, RecordingUnavailable)
-    assert "account check failed" in str(err.value)
+    assert "account check failed" in str(err.value) and ACCOUNT not in str(err.value)
 
 
 def test_other_json_errors_stay_ordinary_failures(tmp_path):
@@ -344,3 +350,57 @@ def test_other_json_errors_stay_ordinary_failures(tmp_path):
     with pytest.raises(FetchError) as err:
         api_fetcher(handler).fetch(APP_LINK, tmp_path)
     assert not isinstance(err.value, RecordingUnavailable)
+
+
+# --- diagnostics for replies we did not expect ------------------------------------------------------
+
+
+def test_describe_json_lists_field_names_and_types_but_never_values():
+    reply = {"recording_url": "https://bucket.s3.amazonaws.com/x.mp3?sig=SECRET", "duration": 41, "owner": None}
+    text = describe_json(reply)
+    assert text == "fields: duration:int, owner:null, recording_url:str"
+    assert "SECRET" not in text and "amazonaws" not in text
+
+
+def test_describe_json_keeps_callrails_error_text_but_strips_urls_and_the_account_id():
+    reply = {"error": f"Account {ACCOUNT} cannot read https://app.callrail.com/calls/CAL1?key=SECRET   today"}
+    text = describe_json(reply, ACCOUNT)
+    assert 'error: "Account <account> cannot read <url> today"' in text
+    assert ACCOUNT not in text and "SECRET" not in text
+
+
+def test_describe_json_caps_long_text_and_handles_non_objects():
+    assert len(describe_json({"message": "x" * 500}).split('message: "')[1]) <= 102
+    assert describe_json(["a"]) == "a JSON list, not an object"
+    assert describe_json({}) == "fields: none"
+
+
+def test_a_reply_with_a_renamed_field_is_a_failure_that_names_what_arrived(tmp_path):
+    reply = {"recording_link": "https://bucket.s3.amazonaws.com/x.mp3?sig=SECRET", "status": "ok"}
+    with pytest.raises(FetchError) as err:
+        api_fetcher(lambda request: httpx.Response(200, json=reply)).fetch(APP_LINK, tmp_path)
+    message = str(err.value)
+    assert not isinstance(err.value, RecordingUnavailable)
+    assert "recording_link:str" in message and "status:str" in message, "the field names show the rename"
+    assert "SECRET" not in message and "amazonaws" not in message and ACCOUNT not in message
+
+
+# --- how long ago a call ended ----------------------------------------------------------------------
+
+NOW = datetime(2026, 10, 2, 22, 0, 0, tzinfo=timezone.utc)
+
+
+def pending_call(date_time, duration):
+    return PendingCall(call_id="c1", call_recording_url="https://x/y", caller_tone="", mentioned_damage="",
+                       lead_source="", date_time=date_time, call_duration_sec=duration)
+
+
+def test_age_runs_from_the_end_of_the_call_not_its_start():
+    assert pending_call("2026-10-02T21:30:00Z", 0).minutes_since_call_ended(NOW) == 30
+    assert pending_call("2026-10-02T21:30:00Z", 600).minutes_since_call_ended(NOW) == 20, "a 10 min call"
+    assert pending_call("2026-10-02T21:30:00Z", None).minutes_since_call_ended(NOW) == 30, "duration unknown"
+
+
+def test_age_is_unknown_when_the_start_time_is_missing_or_unreadable():
+    assert pending_call("", 60).minutes_since_call_ended(NOW) is None
+    assert pending_call("yesterday-ish", 60).minutes_since_call_ended(NOW) is None
