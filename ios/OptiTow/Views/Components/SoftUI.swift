@@ -6,9 +6,18 @@ import SwiftUI
 enum Soft {
     static let canvas = Color(light: Color(hex: 0xE0E5EC), dark: Color(hex: 0x24272C))
     /// The lit edge: white in light mode, a lifted charcoal in dark.
-    static let highlight = Color(light: Color(hex: 0xFFFFFF), dark: Color(hex: 0x32363D))
+    static let highlight = Color(light: Color(hex: 0xFFFFFF), dark: Color(hex: 0x3A3F47))
     /// The shaded edge: a muted slate in light mode, near-black in dark.
     static let shade = Color(light: Color(hex: 0xA3B1C6), dark: Color(hex: 0x101214))
+
+    /// What a raised surface is filled with. Dark mode gets a faint top-left to bottom-right gradient,
+    /// so a button reads as gently domed instead of a flat dark slab.
+    static func raisedFill(_ scheme: ColorScheme) -> AnyShapeStyle {
+        scheme == .dark
+            ? AnyShapeStyle(LinearGradient(colors: [Color(hex: 0x2D3138), Color(hex: 0x212429)],
+                                           startPoint: .topLeading, endPoint: .bottomTrailing))
+            : AnyShapeStyle(canvas)
+    }
 
     /// Light mode lifts a little higher than dark, where the same shadows would look heavy.
     static func offset(_ scheme: ColorScheme) -> CGFloat { scheme == .dark ? 3 : 4 }
@@ -27,12 +36,13 @@ extension Color {
 /// A raised, convex surface: highlight up-left, shade down-right.
 private struct RaisedSurface: View {
     let radius: CGFloat
-    var fill: Color = Soft.canvas
+    /// A custom fill (the primary button's yellow); the theme's raised fill when nil.
+    var fill: Color?
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         RoundedRectangle(cornerRadius: radius, style: .continuous)
-            .fill(fill)
+            .fill(fill.map(AnyShapeStyle.init) ?? Soft.raisedFill(scheme))
             .shadow(color: Soft.highlight, radius: Soft.blur(scheme), x: -Soft.offset(scheme), y: -Soft.offset(scheme))
             .shadow(color: Soft.shade, radius: Soft.blur(scheme), x: Soft.offset(scheme), y: Soft.offset(scheme))
     }
@@ -42,6 +52,9 @@ private struct RaisedSurface: View {
 private struct InsetSurface: View {
     let radius: CGFloat
     var tint: Color = Soft.canvas
+    /// True for an accent-filled (selected) button: the canvas shadow colors would turn a yellow or
+    /// green fill muddy, so plain black and white at low strength are used instead.
+    var isAccent = false
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
@@ -49,8 +62,8 @@ private struct InsetSurface: View {
         let blur = Soft.blur(scheme) * 0.7
         RoundedRectangle(cornerRadius: radius, style: .continuous)
             .fill(tint
-                .shadow(.inner(color: Soft.shade, radius: blur, x: offset, y: offset))
-                .shadow(.inner(color: Soft.highlight, radius: blur, x: -offset, y: -offset)))
+                .shadow(.inner(color: isAccent ? .black.opacity(0.28) : Soft.shade, radius: blur, x: offset, y: offset))
+                .shadow(.inner(color: isAccent ? .white.opacity(0.35) : Soft.highlight, radius: blur, x: -offset, y: -offset)))
     }
 }
 
@@ -187,11 +200,11 @@ private struct SoftButton: ViewModifier {
             // A disabled button is flat: nothing to press.
             RoundedRectangle(cornerRadius: radius, style: .continuous).fill(Theme.fillMuted)
         } else if isSelected {
-            InsetSurface(radius: radius, tint: accentColor.opacity(0.88))
+            InsetSurface(radius: radius, tint: accentColor, isAccent: true)
         } else if isPressed {
             InsetSurface(radius: radius)
         } else {
-            RaisedSurface(radius: radius, fill: standard.raisedFill ?? Soft.canvas)
+            RaisedSurface(radius: radius, fill: standard.raisedFill)
         }
     }
 

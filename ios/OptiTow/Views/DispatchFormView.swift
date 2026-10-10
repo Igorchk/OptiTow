@@ -273,6 +273,12 @@ struct DispatchFormView: View {
             .accessibilityLabel(theme.isNeumorphic ? "Switch to standard style" : "Switch to soft style")
             .accessibilityValue(theme.isNeumorphic ? "Soft style on" : "Standard style on")
         }
+        ToolbarItem(placement: .principal) {
+            Text("New Call")
+                .font(.headline)
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+        }
         ToolbarItem(placement: .primaryAction) {
             let state = syncState
             Button { showSyncDetail = true } label: {
