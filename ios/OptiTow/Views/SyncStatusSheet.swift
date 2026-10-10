@@ -18,7 +18,7 @@ struct SyncStatusSheet: View {
         .presentationDetents([.height(contentHeight + Theme.Spacing.xl + Theme.Spacing.md), .large])
         .presentationDragIndicator(.visible)
         .presentationCornerRadius(Theme.Radius.large)
-        .presentationBackground(Theme.background)
+        .presentationBackground { ThemedFill(role: .canvas) }
     }
 }
 

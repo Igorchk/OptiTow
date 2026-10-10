@@ -38,10 +38,6 @@ private struct OutcomeButton: View {
 
     @ScaledMetric(relativeTo: .largeTitle) private var minHeight = 112.0
 
-    private var shape: RoundedRectangle {
-        RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous)
-    }
-
     var body: some View {
         Button(action: action) {
             VStack(spacing: Theme.Spacing.xxs) {
@@ -54,11 +50,12 @@ private struct OutcomeButton: View {
             .foregroundStyle(isSelected ? Theme.onFill : tone.foreground)
             .padding(Theme.Spacing.sm)
             .frame(maxWidth: .infinity, minHeight: minHeight)
-            .background(isSelected ? fill : Theme.control, in: shape)
-            .overlay(shape.strokeBorder(isSelected ? .clear : tone.foreground.opacity(0.55), lineWidth: 2))
-            .contentShape(shape)
         }
-        .buttonStyle(PressableButtonStyle(pressedScale: 0.98))
+        .buttonStyle(SoftButtonStyle(
+            isSelected: isSelected, accentColor: fill, radius: Theme.Radius.large,
+            standard: SoftStandardStyle(selectedStroke: .clear, unselectedStroke: tone.foreground.opacity(0.55),
+                                        unselectedWidth: 2),
+            pressedScale: 0.98))
         .themeAnimation(value: isSelected)
         .accessibilityLabel("\(title.capitalized), \(subtitle.lowercased())")
         .accessibilityAddTraits(isSelected ? .isSelected : [])

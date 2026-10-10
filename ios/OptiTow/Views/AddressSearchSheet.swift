@@ -32,7 +32,7 @@ struct AddressSearchSheet: View {
             header
             results
         }
-        .background(Theme.background)
+        .themedCanvas()
         .presentationDragIndicator(.visible)
         .task {
             search.update(query: query)
@@ -78,7 +78,7 @@ struct AddressSearchSheet: View {
             }
             .padding(.leading, Theme.Spacing.md)
             .frame(minHeight: Theme.controlMinHeight)
-            .inputSurface(isFocused: fieldFocused)
+            .softFieldRow(isFocused: fieldFocused)
 
             if !stacked { cancelButton }
         }
@@ -114,7 +114,7 @@ struct AddressSearchSheet: View {
                     .frame(maxWidth: .infinity, minHeight: Theme.controlMinHeight - Theme.Spacing.md, alignment: .leading)
                     .contentShape(Rectangle())
                 }
-                .listRowBackground(Theme.surface)
+                .listRowBackground(ThemedFill(role: .surface))
             }
             if trimmed.count >= 2 {
                 Button(action: useAsTyped) {
@@ -125,7 +125,7 @@ struct AddressSearchSheet: View {
                     .frame(maxWidth: .infinity, minHeight: Theme.controlMinHeight - Theme.Spacing.md, alignment: .leading)
                     .contentShape(Rectangle())
                 }
-                .listRowBackground(Theme.surface)
+                .listRowBackground(ThemedFill(role: .surface))
             }
         }
         .listStyle(.plain)

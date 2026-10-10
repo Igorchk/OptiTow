@@ -88,6 +88,7 @@ How each failure is handled:
 - **Start Location:** a static row like Pickup and Dropoff. A confirmed address replaces the configured yard as the route's origin and return point; empty or manual falls back to the yard.
 - **Ask for Location:** with a valid phone, a button texts the customer a link (system Messages sheet; a copy/share fallback where texting is unavailable). The app then polls the Apps Script (`?source=location`) every 3 seconds for up to 5 minutes and fills the Pickup row with the customer's shared position. Needs the updated `Code.gs` deployed (see `apps-script/README.md`).
 - **Save button:** it appears under the Outcome card only once the call can be saved (10-digit phone and an outcome). There is no pinned bottom bar.
+- **Soft style:** the palette button in the toolbar toggles a neumorphic theme (`AppTheme`, stored under the `app_theme` key and read through `\.appTheme`). The modifiers `softCard`, `softButton` and `softFieldRow` in `Views/Components/SoftUI.swift` draw the standard or the soft surface from the same view structure, so a switch never resets the form.
 - **Quick Mileage:** the toolbar map button opens a standalone mileage calculator in a sheet, separate from the call in progress.
 - **Private Cash shortcut:** choosing **Private Cash** fills the payer with **Cash / Customer** if no payer is set yet.
 

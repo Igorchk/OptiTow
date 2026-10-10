@@ -11,16 +11,7 @@ struct SurfaceCard<Content: View>: View {
         content
             .padding(padding)
             .frame(maxWidth: .infinity, alignment: .leading)
-            // The shadow belongs to the card's own surface. Applied to the whole view it would also
-            // be cast by every control inside the card.
-            .background {
-                RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .fill(Theme.surface)
-                    .cardShadow()
-            }
-            .overlay(
-                RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .strokeBorder(Theme.hairline, lineWidth: 1)
-            )
+            // The shadow belongs to the card's own surface, not to the controls inside it.
+            .softCard(radius: radius)
     }
 }

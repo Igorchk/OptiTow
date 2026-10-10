@@ -56,7 +56,7 @@ struct AddressField: View {
                     .accessibilityLabel("Clear \(label)")
                 }
             }
-            .inputSurface()
+            .softFieldRow()
 
             status
         }

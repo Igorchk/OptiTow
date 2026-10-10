@@ -45,7 +45,7 @@ struct LocationLinkFallbackSheet: View {
                 }
                 .padding(Theme.Spacing.md)
             }
-            .background(Theme.background)
+            .themedCanvas()
             .navigationTitle("Send the link")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)

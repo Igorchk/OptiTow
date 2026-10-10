@@ -29,7 +29,7 @@ struct PressableButtonStyle: ButtonStyle {
 }
 
 /// Fires the haptic when a press begins (not when it ends), and only if one was requested.
-private struct PressHaptic: ViewModifier {
+struct PressHaptic: ViewModifier {
     let feedback: SensoryFeedback?
     let isPressed: Bool
 
@@ -84,11 +84,12 @@ struct ActionPillButton: View {
             .padding(.horizontal, Theme.Spacing.md)
             .padding(.vertical, Theme.Spacing.xs)
             .frame(maxWidth: fillsWidth ? .infinity : nil, minHeight: minHeight)
-            .background(background, in: Capsule())
-            .overlay(Capsule().strokeBorder(border, lineWidth: 1))
-            .contentShape(Capsule())
         }
-        .buttonStyle(PressableButtonStyle(haptic: .impact(weight: .light)))
+        .buttonStyle(SoftButtonStyle(
+            radius: 100,
+            standard: SoftStandardStyle(unselectedFill: background, unselectedStroke: border,
+                                        raisedFill: kind == .primary ? Theme.selected : nil),
+            haptic: .impact(weight: .light)))
         .animation(Theme.spring, value: isEnabled)
     }
 

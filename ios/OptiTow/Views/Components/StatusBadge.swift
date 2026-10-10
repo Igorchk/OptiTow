@@ -8,6 +8,8 @@ struct StatusBadge: View {
     var systemImage: String?
     var tone: Theme.Tone = .neutral
 
+    @Environment(\.dynamicTypeSize) private var typeSize
+
     var body: some View {
         HStack(spacing: Theme.Spacing.xxs) {
             if let systemImage {
@@ -15,9 +17,11 @@ struct StatusBadge: View {
                     .imageScale(.small)
                     .accessibilityHidden(true)
             }
-            // Never truncated: at accessibility text sizes the label wraps onto a second line instead.
+            // Never truncated. At normal sizes it stays on one line (a toolbar that is short of room
+            // shrinks the title instead); at accessibility sizes it wraps onto more lines.
             Text(title)
-                .fixedSize(horizontal: false, vertical: true)
+                .lineLimit(typeSize.isAccessibilitySize ? nil : 1)
+                .fixedSize(horizontal: !typeSize.isAccessibilitySize, vertical: true)
         }
         .font(.caption2.weight(.bold).monospacedDigit())
         .textCase(.uppercase)
