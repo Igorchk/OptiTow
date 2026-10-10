@@ -28,3 +28,8 @@ worker/worker.log*
 optitow-audio-*/
 __pycache__/
 .pytest_cache/
+
+# clasp (Apps Script deploy): project link and OAuth credentials
+.clasp.json
+.clasprc.json
+apps-script/.clasp.json
