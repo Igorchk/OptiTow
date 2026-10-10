@@ -106,9 +106,7 @@ struct TripMileageCard: View {
         }
         .padding(Theme.Spacing.md)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.control, in: RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
-            .strokeBorder(Theme.controlBorder, lineWidth: 1))
+        .softFieldRow()
         .accessibilityElement(children: .combine)
     }
 }
@@ -118,10 +116,6 @@ private struct LegCell: View {
     let title: String
     let miles: Double?
     let isLoading: Bool
-
-    private var shape: RoundedRectangle {
-        RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
-    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
@@ -137,8 +131,7 @@ private struct LegCell: View {
         }
         .padding(Theme.Spacing.sm)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.control, in: shape)
-        .overlay(shape.strokeBorder(Theme.controlBorder, lineWidth: 1))
+        .softFieldRow()
         .opacity(isLoading ? 0.6 : 1)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityLabel)

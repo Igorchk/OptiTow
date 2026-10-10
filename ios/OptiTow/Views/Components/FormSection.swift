@@ -34,17 +34,6 @@ struct FieldGroup<Content: View>: View {
     }
 }
 
-extension View {
-    /// The fill and outline shared by every text input: a faint well with a fine outline that turns
-    /// amber and thicker when focused.
-    func inputSurface(isFocused: Bool = false) -> some View {
-        let shape = RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
-        return background(Theme.control, in: shape)
-            .overlay(shape.strokeBorder(isFocused ? Theme.selectedStroke : Theme.controlBorder,
-                                        lineWidth: isFocused ? 2 : 1))
-    }
-}
-
 /// Large text field. `label` is what VoiceOver reads; `placeholder` is the hint shown while empty.
 struct BigTextField: View {
     let label: String
@@ -65,7 +54,7 @@ struct BigTextField: View {
             .focused($isFocused)
             .padding(.horizontal, Theme.Spacing.md)
             .frame(minHeight: minHeight)
-            .inputSurface(isFocused: isFocused)
+            .softFieldRow(isFocused: isFocused)
             .themeAnimation(value: isFocused)
             .autocorrectionDisabled(keyboard != .text)
             #if os(iOS)
@@ -91,7 +80,7 @@ struct NotesField: View {
             .focused($isFocused)
             .padding(Theme.Spacing.md)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .inputSurface(isFocused: isFocused)
+            .softFieldRow(isFocused: isFocused)
             .themeAnimation(value: isFocused)
     }
 }

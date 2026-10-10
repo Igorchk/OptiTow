@@ -44,7 +44,7 @@ struct MileageCalculatorView: View {
             .scrollDismissesKeyboard(.interactively)
             // Short content still bounces, so a drag dismisses the keyboard and reveals the result.
             .scrollBounceBehavior(.always, axes: .vertical)
-            .background(Theme.background)
+            .themedCanvas()
             .navigationTitle("Quick Mileage")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)

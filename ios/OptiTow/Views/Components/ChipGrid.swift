@@ -35,10 +35,6 @@ struct ChipButton: View {
 
     @ScaledMetric(relativeTo: .headline) private var minHeight = Theme.chipMinHeight
 
-    private var shape: RoundedRectangle {
-        RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
-    }
-
     var body: some View {
         Button(action: action) {
             Text(title)
@@ -48,14 +44,8 @@ struct ChipButton: View {
                 .padding(.horizontal, Theme.Spacing.sm)
                 .padding(.vertical, Theme.Spacing.xs)
                 .frame(maxWidth: .infinity, minHeight: minHeight)
-                .background(isSelected ? Theme.selected : Theme.control, in: shape)
-                .overlay(
-                    shape.strokeBorder(isSelected ? Theme.selectedStroke : Theme.controlBorder,
-                                       lineWidth: isSelected ? 2 : 1)
-                )
-                .contentShape(shape)
         }
-        .buttonStyle(PressableButtonStyle())
+        .buttonStyle(SoftButtonStyle(isSelected: isSelected))
         .themeAnimation(value: isSelected)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
     }

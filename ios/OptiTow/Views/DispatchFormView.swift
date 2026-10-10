@@ -4,6 +4,7 @@ import SwiftUI
 struct DispatchFormView: View {
     @Environment(SyncManager.self) private var sync
 
+    @AppStorage(AppTheme.storageKey) private var theme: AppTheme = .standard
     @State private var draft = CallDraft()
     @State private var savedCount = 0
     @State private var showSavedBanner = false
@@ -62,7 +63,7 @@ struct DispatchFormView: View {
                     .id(draft.call_id)
                 }
                 .scrollDismissesKeyboard(.interactively)
-                .background(Theme.background)
+                .themedCanvas()
                 .onChange(of: scrollTopTick) {
                     withAnimation { proxy.scrollTo("top", anchor: .top) }
                 }
@@ -120,6 +121,9 @@ struct DispatchFormView: View {
             let digits = String(newValue.filter(\.isNumber).prefix(4))
             if digits != newValue { draft.vehicle_year = digits }
         }
+        .sensoryFeedback(.impact(weight: .light), trigger: theme)
+        // Outermost, so the toolbar, the sheets and every card read the same theme.
+        .environment(\.appTheme, theme)
     }
 
     // MARK: - Sections
@@ -258,10 +262,16 @@ struct DispatchFormView: View {
             Button("Clear") { confirmClear = true }
             Button { showQuickMileage = true } label: {
                 Image(systemName: "map")
-                    .frame(minWidth: 44, minHeight: 44)
+                    .frame(minWidth: 34, minHeight: 44)
             }
             .accessibilityLabel("Quick mileage")
             .accessibilityHint("Opens a standalone mileage calculator. The current call is not changed.")
+            Button { withAnimation(.easeInOut(duration: 0.25)) { theme = theme.toggled } } label: {
+                Image(systemName: theme.isNeumorphic ? "circle.lefthalf.filled" : "paintpalette.fill")
+                    .frame(minWidth: 34, minHeight: 44)
+            }
+            .accessibilityLabel(theme.isNeumorphic ? "Switch to standard style" : "Switch to soft style")
+            .accessibilityValue(theme.isNeumorphic ? "Soft style on" : "Standard style on")
         }
         ToolbarItem(placement: .primaryAction) {
             let state = syncState

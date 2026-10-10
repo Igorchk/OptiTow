@@ -35,9 +35,7 @@ struct LocationRequestStatus: View {
             }
             .padding(.leading, Theme.Spacing.md)
             .padding(.vertical, Theme.Spacing.xxs)
-            .background(Theme.control, in: RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
-                .strokeBorder(Theme.controlBorder, lineWidth: 1))
+            .softFieldRow()
             .accessibilityElement(children: .contain)
         }
     }
