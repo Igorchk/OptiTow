@@ -35,6 +35,9 @@ struct MileageCalculatorView: View {
                         }
                     }
                     TripMileageCard(state: trip.state, onRetry: trip.retry)
+                    if let map = trip.map {
+                        RouteMapPreviewCard(map: map, isLoading: trip.state == .loading)
+                    }
                 }
                 .padding(Theme.Spacing.md)
             }
