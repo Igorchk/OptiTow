@@ -61,8 +61,52 @@ enum TripFailure: Int, Comparable, Error, Sendable {
 
 struct TripTimeout: Error {}
 
+/// A point on the map. Plain doubles, so route geometry can cross concurrency boundaries and be
+/// compared (MapKit's own polyline and route classes are neither `Sendable` nor `Equatable`).
+struct GeoPoint: Equatable, Sendable {
+    var latitude: Double
+    var longitude: Double
+
+    init(latitude: Double, longitude: Double) {
+        self.latitude = latitude
+        self.longitude = longitude
+    }
+
+    init(_ coordinate: CLLocationCoordinate2D) {
+        self.init(latitude: coordinate.latitude, longitude: coordinate.longitude)
+    }
+
+    var coordinate: CLLocationCoordinate2D {
+        CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+    }
+}
+
+/// One routed leg: the driving distance and the line to draw for it.
+struct DrivingRoute: Equatable, Sendable {
+    var meters: Double
+    var path: [GeoPoint]
+}
+
+/// The line of each leg, empty until that leg has been routed (or when it could not be).
+struct TripPaths: Equatable, Sendable {
+    var toPickup: [GeoPoint] = []
+    var loaded: [GeoPoint] = []
+    var toYard: [GeoPoint] = []
+}
+
+/// Everything the route map draws: the three stops, plus whichever legs have been routed so far.
+struct TripMap: Equatable, Sendable {
+    /// Where the truck leaves from and returns to: the yard, or the confirmed Start Location.
+    var origin: GeoPoint
+    var originIsYard: Bool
+    var pickup: GeoPoint
+    var dropoff: GeoPoint
+    var paths = TripPaths()
+}
+
 struct TripResult: Equatable, Sendable {
     var legs: TripLegs
+    var paths = TripPaths()
     /// The most serious problem among the legs that could not be routed, if any.
     var failure: TripFailure?
 }
