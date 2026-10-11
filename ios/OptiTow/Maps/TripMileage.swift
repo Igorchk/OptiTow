@@ -81,10 +81,26 @@ struct GeoPoint: Equatable, Sendable {
     }
 }
 
-/// One routed leg: the driving distance and the line to draw for it.
+/// One routed leg: the driving distance, the expected travel time with current traffic, and the
+/// line to draw for it.
 struct DrivingRoute: Equatable, Sendable {
     var meters: Double
+    var seconds: TimeInterval
     var path: [GeoPoint]
+}
+
+/// Travel time as short text for the dispatcher to read out.
+enum TravelTime {
+    /// "18min", "1hr 12min" (the formatter's brief style), or "< 1 min" under a minute. Nil for no value or zero. Rounds to the
+    /// nearest minute, so 18.9 minutes reads as 19, not 18.
+    static func text(_ seconds: TimeInterval?) -> String? {
+        guard let seconds, seconds > 0, seconds.isFinite else { return nil }
+        guard seconds >= 60 else { return "< 1 min" }
+        let formatter = DateComponentsFormatter()
+        formatter.allowedUnits = [.hour, .minute]
+        formatter.unitsStyle = .brief
+        return formatter.string(from: (seconds / 60).rounded() * 60)
+    }
 }
 
 /// The line of each leg, empty until that leg has been routed (or when it could not be).
@@ -102,13 +118,20 @@ struct TripMap: Equatable, Sendable {
     var pickup: GeoPoint
     var dropoff: GeoPoint
     var paths = TripPaths()
+    /// Yard (or start) to pickup: miles, and travel time with live traffic. Nil until routed.
+    var leg1Miles: Double?
+    var leg1Seconds: TimeInterval?
 }
 
 struct TripResult: Equatable, Sendable {
     var legs: TripLegs
     var paths = TripPaths()
+    /// Yard (or start) to pickup, with live traffic. Nil when that leg could not be routed.
+    var leg1TravelTime: TimeInterval?
     /// The most serious problem among the legs that could not be routed, if any.
     var failure: TripFailure?
+
+    var formattedLeg1ETA: String? { TravelTime.text(leg1TravelTime) }
 }
 
 /// What the Trip Mileage card shows.
