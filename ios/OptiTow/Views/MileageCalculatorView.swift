@@ -28,6 +28,7 @@ struct MileageCalculatorView: View {
                         FieldGroup(label: "Pickup Address") {
                             AddressField(label: "Pickup address", placeholder: "Tap to enter pickup address",
                                          text: $pickupText, entry: $pickup)
+                            ETABadge(state: trip.eta, fromYard: trip.etaFromYard)
                         }
                         FieldGroup(label: "Dropoff Address") {
                             AddressField(label: "Dropoff address", placeholder: "Tap to enter dropoff address",

@@ -90,6 +90,7 @@ How each failure is handled:
 - **Save button:** it appears under the Outcome card only once the call can be saved (10-digit phone and an outcome). There is no pinned bottom bar.
 - **Soft style:** the palette button in the toolbar toggles a neumorphic theme (`AppTheme`, stored under the `app_theme` key and read through `\.appTheme`). The modifiers `softCard`, `softButton` and `softFieldRow` in `Views/Components/SoftUI.swift` draw the standard or the soft surface from the same view structure, so a switch never resets the form.
 - **Landmark / Clue search:** the address sheet has a "Standard Address / Landmark / Clue" picker. Landmark mode runs a natural-language Apple Maps search (California only, up to six matches with address and distance from the yard) when you press Search, for places described by a business or a cross street rather than an address.
+- **Live-traffic ETA:** a badge under the Pickup row shows the driving time from the yard (or the Start Location) to the pickup with current traffic, as soon as the pickup is confirmed; the Route Map card also shows it next to the leg's miles. Uses `MKDirections` with `departureDate = now`. Display only.
 - **Quick Mileage:** the toolbar map button opens a standalone mileage calculator in a sheet, separate from the call in progress.
 - **Private Cash shortcut:** choosing **Private Cash** fills the payer with **Cash / Customer** if no payer is set yet.
 

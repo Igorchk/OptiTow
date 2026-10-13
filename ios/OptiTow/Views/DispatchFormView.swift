@@ -199,6 +199,7 @@ struct DispatchFormView: View {
                 AddressField(label: "Pickup address", placeholder: "Tap to enter pickup address",
                              text: $draft.pickup_address, entry: $draft.pickup_entry)
                 LocationRequestStatus(state: location.state, onDismiss: location.cancel)
+                ETABadge(state: trip.eta, fromYard: trip.etaFromYard)
             }
             FieldGroup(label: "Dropoff Address") {
                 AddressField(label: "Dropoff address", placeholder: "Tap to enter dropoff address",

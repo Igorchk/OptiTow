@@ -27,6 +27,7 @@ struct RouteMapPreviewCard: View {
             VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
                 mapView
                 legend
+                leg1Summary
             }
         }
         // Fit the whole route again when a stop changes or a leg's line arrives; a pan or zoom in
@@ -96,6 +97,20 @@ struct RouteMapPreviewCard: View {
         .accessibilityLabel("Legend: dashed orange is the trip to the pickup, solid green is the loaded tow, dashed blue is the return.")
     }
 
+    /// "Yard → Pickup: 15.8 mi • 24 min". Distance only when there is no travel time; a placeholder
+    /// while routing, so the card keeps its height when the numbers arrive.
+    private var leg1Summary: some View {
+        let origin = map.originIsYard ? "Yard" : "Start"
+        var parts: [String] = []
+        if let miles = map.leg1Miles { parts.append("\(Miles.text(miles)) mi") }
+        if let time = TravelTime.text(map.leg1Seconds) { parts.append(time) }
+        let detail = parts.isEmpty ? (isLoading ? "calculating…" : "unavailable") : parts.joined(separator: " • ")
+        return Text("\(origin) → Pickup: \(detail)")
+            .font(.footnote.weight(.medium))
+            .foregroundStyle(Theme.textSecondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     // MARK: Framing
 
     /// The smallest rectangle holding every stop and line, with room around it. Never smaller than a
@@ -159,7 +174,8 @@ private enum RouteMapSamples {
 
     static let full = TripMap(origin: yard, originIsYard: true, pickup: pickup, dropoff: dropoff,
                               paths: TripPaths(toPickup: line(yard, pickup), loaded: line(pickup, dropoff),
-                                               toYard: line(dropoff, yard)))
+                                               toYard: line(dropoff, yard)),
+                              leg1Miles: 15.8, leg1Seconds: 1_440)
     static let stopsOnly = TripMap(origin: yard, originIsYard: false, pickup: pickup, dropoff: dropoff)
 }
 
