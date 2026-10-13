@@ -47,8 +47,8 @@ private struct ETABadgeGallery: View {
     var body: some View {
         VStack(spacing: Theme.Spacing.md) {
             ETABadge(state: .loading, fromYard: true)
-            ETABadge(state: .ready("18min"), fromYard: true)
-            ETABadge(state: .ready("1hr 12min"), fromYard: false)
+            ETABadge(state: .ready("18 min"), fromYard: true)
+            ETABadge(state: .ready("1 hr 12 min"), fromYard: false)
             ETABadge(state: .unavailable, fromYard: true)
         }
         .padding(Theme.Spacing.md)

@@ -108,7 +108,7 @@ struct TripRouter: Sendable {
 enum ETAState: Equatable, Sendable {
     case idle
     case loading
-    /// Ready-to-read text, such as "18min".
+    /// Ready-to-read text, such as "18 min".
     case ready(String)
     case unavailable
 

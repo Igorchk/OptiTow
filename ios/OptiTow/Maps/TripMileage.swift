@@ -91,15 +91,16 @@ struct DrivingRoute: Equatable, Sendable {
 
 /// Travel time as short text for the dispatcher to read out.
 enum TravelTime {
-    /// "18min", "1hr 12min" (the formatter's brief style), or "< 1 min" under a minute. Nil for no value or zero. Rounds to the
+    /// "18 min", "1 hr 12 min", or "< 1 min" under a minute. Nil for no value or zero. Rounds to the
     /// nearest minute, so 18.9 minutes reads as 19, not 18.
     static func text(_ seconds: TimeInterval?) -> String? {
         guard let seconds, seconds > 0, seconds.isFinite else { return nil }
         guard seconds >= 60 else { return "< 1 min" }
         let formatter = DateComponentsFormatter()
         formatter.allowedUnits = [.hour, .minute]
-        formatter.unitsStyle = .brief
-        return formatter.string(from: (seconds / 60).rounded() * 60)
+        formatter.unitsStyle = .short
+        // The short style puts a comma between units ("1 hr, 12 min"); read aloud it is cleaner without.
+        return formatter.string(from: (seconds / 60).rounded() * 60)?.replacingOccurrences(of: ",", with: "")
     }
 }
 
