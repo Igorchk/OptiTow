@@ -413,11 +413,26 @@ function parseRequest_(e) {
   };
 }
 
+/**
+ * A Script Property cleaned of what a paste leaves behind: surrounding whitespace, newlines and tabs,
+ * and surrounding quote characters. '' when it is unset or blank. Used for every secret and id the
+ * script reads, so an invisible stray character cannot make a correct value fail.
+ */
+function sanitizeProperty_(value) {
+  let s = String(value === undefined || value === null ? '' : value).trim();
+  while (/^["']|["']$/.test(s)) s = s.replace(/^["']+|["']+$/g, '').trim();
+  return s;
+}
+
+function getScriptProperty_(name) {
+  return sanitizeProperty_(PropertiesService.getScriptProperties().getProperty(name));
+}
+
 function authorize_(source, token) {
   // The website token ships in public page code, so it gets its own secret that can
   // only create website leads — never the API_SECRET used by the app, CallRail and AI.
   const propName = source === 'website' ? 'WEBSITE_SECRET' : 'API_SECRET';
-  const expected = PropertiesService.getScriptProperties().getProperty(propName);
+  const expected = getScriptProperty_(propName);
   if (!expected) {
     throw new ApiError('SERVER_MISCONFIGURED', propName + ' is not set in Script Properties.');
   }
@@ -1027,11 +1042,10 @@ function callDataFromRecord_(rec) {
 
 /** The three FastField settings, or null (with a warning) when any is missing or blank. */
 function fastFieldConfig_() {
-  const props = PropertiesService.getScriptProperties();
   const config = {};
   const missing = [];
   FASTFIELD_REQUIRED.forEach(function (name) {
-    const value = String(props.getProperty(name) || '').trim();
+    const value = getScriptProperty_(name);
     if (value) config[name] = value;
     else missing.push(name);
   });
@@ -1044,13 +1058,14 @@ function fastFieldConfig_() {
 
 /**
  * Every header FastField's gateway (Azure API Management) may look for a key in. The gateway
- * answered a Bearer-only request with "missing subscription key", so the key goes in all three
- * places it is known to be read from; the extra headers are harmless where unused.
+ * answered a Bearer-only request with "missing subscription key", so the key goes in each place a
+ * key is commonly read from; the extra headers are harmless where unused.
  */
 function getFastFieldHeaders_(apiKey) {
   return {
     'Ocp-Apim-Subscription-Key': apiKey,
     'Authorization': 'Bearer ' + apiKey,
+    'x-api-key': apiKey,
     'fastfield-api-key': apiKey,
     'Content-Type': 'application/json',
     'Accept': 'application/json',
@@ -1192,28 +1207,75 @@ function describeFastFieldError_(result) {
 }
 
 /**
- * Diagnostic for a 401: tries the key as a `subscription-key` query parameter, with none of the
- * header forms, and logs whether the gateway takes it. The URL (which holds the key) is never logged.
+ * What a key looks like, without revealing it: its length, a masked form, whether it is 32-character
+ * hex, and anything a paste may have added (surrounding whitespace or quotes, whitespace inside).
+ * `raw` is the property as stored, `key` the cleaned value that is actually sent.
  */
-function probeQuerySubscriptionKey_(apiKey) {
-  const url = CONFIG.FASTFIELD_FORMS_URL + (CONFIG.FASTFIELD_FORMS_URL.indexOf('?') === -1 ? '?' : '&') +
-    'subscription-key=' + encodeURIComponent(apiKey);
-  const probe = fastFieldGet_(url, { Accept: 'application/json' });
-  if (probe.error) {
-    Logger.log('Query-parameter check failed before FastField answered: ' + probe.error);
-  } else if (probe.code === 200) {
-    Logger.log('Query-parameter check: HTTP 200. The gateway ACCEPTS the key as ?subscription-key=, but not in the headers sent above. The header name this gateway reads is not one of the ones tried; tell me and the code can send the key as a query parameter.');
+function describeKey_(raw, key) {
+  const stored = String(raw === undefined || raw === null ? '' : raw);
+  let format = 'other';
+  if (/^[0-9a-f]{32}$/i.test(key)) format = '32-character hexadecimal';
+  else if (/^[0-9a-f]+$/i.test(key)) format = 'hexadecimal, ' + key.length + ' characters';
+  else if (/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(key)) format = 'JWT-like (three dot-separated parts)';
+  else if (/^[A-Za-z0-9]+$/.test(key)) format = 'alphanumeric';
+  return {
+    length: key.length,
+    // A short key would be mostly on show, so those are not masked this way.
+    masked: key.length >= 16 ? key.slice(0, 4) + '...' + key.slice(-4) : '(too short to show safely)',
+    isHex32: /^[0-9a-f]{32}$/i.test(key),
+    format: format,
+    hadSurroundingWhitespace: stored !== stored.trim(),
+    hadSurroundingQuotes: /^\s*["']|["']\s*$/.test(stored),
+    hasInternalWhitespace: /\s/.test(key),
+  };
+}
+
+/**
+ * After a 401, sends the same GET once per way of presenting the key, each on its own, and logs what
+ * the gateway says to each. Azure only reads Ocp-Apim-Subscription-Key (or ?subscription-key=), so
+ * "invalid subscription key" for that one means the gateway read the key and does not know it,
+ * while "missing" for the others is just them being ignored. Neither the key nor the URL that holds
+ * it is logged.
+ */
+function probeFastFieldKeyPlacements_(apiKey) {
+  const url = CONFIG.FASTFIELD_FORMS_URL;
+  const attempts = [
+    { label: 'Ocp-Apim-Subscription-Key header only', url: url, headers: { 'Ocp-Apim-Subscription-Key': apiKey, Accept: 'application/json' } },
+    { label: 'x-api-key header only', url: url, headers: { 'x-api-key': apiKey, Accept: 'application/json' } },
+    { label: 'Authorization: Bearer header only', url: url, headers: { Authorization: 'Bearer ' + apiKey, Accept: 'application/json' } },
+    {
+      label: '?subscription-key= query parameter only',
+      url: url + (url.indexOf('?') === -1 ? '?' : '&') + 'subscription-key=' + encodeURIComponent(apiKey),
+      headers: { Accept: 'application/json' },
+    },
+  ];
+  Logger.log('The gateway refused the key. Trying each way of sending it on its own:');
+  let accepted = null;
+  attempts.forEach(function (attempt) {
+    const probe = fastFieldGet_(attempt.url, attempt.headers);
+    if (probe.error) {
+      Logger.log('  ' + attempt.label + ': request failed (' + probe.error + ')');
+    } else {
+      Logger.log('  ' + attempt.label + ': HTTP ' + probe.code + (probe.code === 200 ? ' (accepted)' : ' - ' + describeFastFieldError_(probe)));
+      if (probe.code === 200 && !accepted) accepted = attempt.label;
+    }
+  });
+  if (accepted) {
+    Logger.log('The gateway accepts the key via: ' + accepted + '. Tell me which, and the code can be narrowed to it.');
   } else {
-    Logger.log('Query-parameter check: HTTP ' + probe.code + '. The gateway does not accept the key as ?subscription-key= either. Reply: ' + describeFastFieldError_(probe));
-    Logger.log('The key itself is probably not a valid subscription key for this API, or it is for a different product. Check FASTFIELD_API_KEY with FastField (the key from their developer portal / API access page).');
+    Logger.log('No placement worked. If the Ocp-Apim-Subscription-Key line says "invalid", the gateway read the key and does not recognize it: ' +
+      'whitespace and quotes are already removed, so this value is probably not a subscription key for this API (or its subscription is inactive). ' +
+      'Get the subscription key for the v3 API from FastField (their developer portal or support).');
   }
 }
 
 /**
  * Manual diagnostic: run it from the Apps Script editor to check FastField with the live Script
  * Properties, in two steps.
+ *   0. A safe summary of the stored key (length, masked ends, format, stray whitespace or quotes).
  *   1. Authentication and form: GET the forms list with the API key (sent in every header form the
- *      gateway may read) and look for FASTFIELD_FORM_ID. A 401 also tries the key as a query parameter.
+ *      gateway may read) and look for FASTFIELD_FORM_ID. A 401 then tries each way of sending the
+ *      key on its own, to show which one the gateway reads.
  *   2. Dispatch: send one clearly marked TEST task and log the status, headers and reply (with
  *      FastField's own message for a 400 or 422).
  * It never touches the Call Log. The task is real, though: it appears on the driver's FastField
@@ -1226,6 +1288,14 @@ function testFastFieldDispatch() {
     return null;
   }
 
+  const info = describeKey_(PropertiesService.getScriptProperties().getProperty('FASTFIELD_API_KEY'), config.FASTFIELD_API_KEY);
+  Logger.log('FASTFIELD_API_KEY as stored (never logged in full):');
+  Logger.log('  Key Length: ' + info.length);
+  Logger.log('  Key Masked: ' + info.masked);
+  Logger.log('  Is 32-character Hexadecimal: ' + info.isHex32 + ' (format: ' + info.format + ')');
+  Logger.log('  Contains Whitespace Before Trim: ' + info.hadSurroundingWhitespace + (info.hadSurroundingWhitespace ? ' (removed before sending)' : ''));
+  Logger.log('  Had Surrounding Quotes: ' + info.hadSurroundingQuotes + (info.hadSurroundingQuotes ? ' (removed before sending)' : ''));
+  Logger.log('  Contains Whitespace Inside: ' + info.hasInternalWhitespace + (info.hasInternalWhitespace ? ' (NOT removed: the key was probably pasted with a line break in it)' : ''));
   Logger.log('Step 1 of 2: checking the API key and form id (GET ' + CONFIG.FASTFIELD_FORMS_URL + ')');
   const forms = fastFieldGet_(CONFIG.FASTFIELD_FORMS_URL, getFastFieldHeaders_(config.FASTFIELD_API_KEY));
   if (forms.error) {
@@ -1237,7 +1307,7 @@ function testFastFieldDispatch() {
     if (forms.code === 401 || forms.code === 403) Logger.log('Rejected: the API key was not accepted. Check FASTFIELD_API_KEY.');
     else if (forms.code === 404) Logger.log('Not found: check CONFIG.FASTFIELD_FORMS_URL.');
     Logger.log('Reply: ' + describeFastFieldError_(forms));
-    if (forms.code === 401) probeQuerySubscriptionKey_(config.FASTFIELD_API_KEY);
+    if (forms.code === 401) probeFastFieldKeyPlacements_(config.FASTFIELD_API_KEY);
     Logger.log('Stopped: fix step 1 before a task is sent.');
     return null;
   }

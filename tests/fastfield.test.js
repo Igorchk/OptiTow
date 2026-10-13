@@ -44,6 +44,7 @@ function assertFastFieldHeaders(call, key = 'ff-key-123') {
   const h = call.options.headers;
   assert.equal(h['Ocp-Apim-Subscription-Key'], key);
   assert.equal(h.Authorization, 'Bearer ' + key);
+  assert.equal(h['x-api-key'], key);
   assert.equal(h['fastfield-api-key'], key);
   assert.equal(h['Content-Type'], 'application/json');
   assert.equal(h.Accept, 'application/json');
@@ -387,7 +388,7 @@ test('testFastFieldDispatch: a rejected key stops at step 1 with a hint', () => 
   const env = configure(makeContext());
   fastFieldServer(env, { forms: { code: 401, body: '{"message":"Access denied"}' } });
   assert.equal(env.ctx.testFastFieldDispatch(), null);
-  assert.equal(env.fetchCalls.length, 2, 'the forms request, then the 401 query-parameter check; never a dispatch');
+  assert.equal(env.fetchCalls.length, 5, 'the forms request, then four single-placement probes; never a dispatch');
   assert.ok(env.fetchCalls.every((c) => c.url.startsWith(FORMS_URL)));
   assert.match(env.logger.join('\n'), /HTTP status: 401[\s\S]*FASTFIELD_API_KEY[\s\S]*Access denied/);
 });
@@ -428,11 +429,12 @@ test('testFastFieldDispatch: a missing setting and a network failure are explain
   assert.match(html.logger.join('\n'), /not JSON[\s\S]*bad gateway/);
 });
 
-test('headers: getFastFieldHeaders_ puts the key in all three places and asks for JSON', () => {
+test('headers: getFastFieldHeaders_ puts the key in every header form and asks for JSON', () => {
   const env = makeContext();
   assert.deepEqual(JSON.parse(JSON.stringify(env.ctx.getFastFieldHeaders_('K'))), {
     'Ocp-Apim-Subscription-Key': 'K',
     Authorization: 'Bearer K',
+    'x-api-key': 'K',
     'fastfield-api-key': 'K',
     'Content-Type': 'application/json',
     Accept: 'application/json',
@@ -448,29 +450,36 @@ test('headers: every request FastField receives carries the subscription key, in
   env.fetchCalls.forEach((call) => assertFastFieldHeaders(call));
 });
 
-test('testFastFieldDispatch: a 401 on the forms list also tries ?subscription-key= and reports an accepting gateway', () => {
+test('testFastFieldDispatch: a 401 tries each way of sending the key on its own and reports the one that works', () => {
   const env = configure(makeContext());
-  env.fetcher.respond = (url) => (url.includes('subscription-key=ff-key-123')
+  env.fetcher.respond = (url, options) => (url.includes('subscription-key=ff-key-123')
     ? { code: 200, body: JSON.stringify(FORMS) }
     : { code: 401, body: JSON.stringify({ statusCode: 401, message: 'Access denied due to missing subscription key.' }) });
   assert.equal(env.ctx.testFastFieldDispatch(), null);
-  assert.equal(env.fetchCalls.length, 2, 'no task is dispatched');
-  assert.equal(env.fetchCalls[1].url, FORMS_URL + '?subscription-key=ff-key-123');
-  assert.equal(env.fetchCalls[1].options.headers.Authorization, undefined, 'the probe sends the key only in the URL');
+  assert.equal(env.fetchCalls.length, 5, 'no task is dispatched');
+  const [, ocp, xapi, bearer, query] = env.fetchCalls;
+  assert.deepEqual(Object.keys(ocp.options.headers).filter((h) => h !== 'Accept'), ['Ocp-Apim-Subscription-Key']);
+  assert.deepEqual(Object.keys(xapi.options.headers).filter((h) => h !== 'Accept'), ['x-api-key']);
+  assert.deepEqual(Object.keys(bearer.options.headers).filter((h) => h !== 'Accept'), ['Authorization']);
+  assert.equal(query.url, FORMS_URL + '?subscription-key=ff-key-123');
+  assert.deepEqual(Object.keys(query.options.headers), ['Accept'], 'the query probe sends the key only in the URL');
   const log = env.logger.join('\n');
   assert.match(log, /HTTP status: 401[\s\S]*missing subscription key/);
-  assert.match(log, /ACCEPTS the key as \?subscription-key=/);
+  assert.match(log, /Ocp-Apim-Subscription-Key header only: HTTP 401/);
+  assert.match(log, /\?subscription-key= query parameter only: HTTP 200 \(accepted\)/);
+  assert.match(log, /accepts the key via: \?subscription-key= query parameter only/);
   assert.ok(!log.includes('ff-key-123'), 'neither the key nor the URL holding it is logged');
 });
 
-test('testFastFieldDispatch: when the query parameter is refused too, it says the key itself is suspect', () => {
+test('testFastFieldDispatch: when no placement works it says the key value is the problem', () => {
   const env = configure(makeContext());
   env.fetcher.respond = () => ({ code: 401, body: JSON.stringify({ message: 'Access denied due to invalid subscription key.' }) });
   assert.equal(env.ctx.testFastFieldDispatch(), null);
-  assert.equal(env.fetchCalls.length, 2);
+  assert.equal(env.fetchCalls.length, 5);
   const log = env.logger.join('\n');
-  assert.match(log, /does not accept the key as \?subscription-key= either/);
-  assert.match(log, /key itself is probably not a valid subscription key/);
+  assert.match(log, /No placement worked/);
+  assert.match(log, /whitespace and quotes are already removed/);
+  assert.match(log, /invalid subscription key/);
   assert.ok(!log.includes('ff-key-123'));
 });
 
@@ -479,6 +488,89 @@ test('testFastFieldDispatch: a non-401 failure does not run the query-parameter 
   fastFieldServer(env, { forms: { code: 404, body: '{"message":"Resource not found"}' } });
   env.ctx.testFastFieldDispatch();
   assert.equal(env.fetchCalls.length, 1);
+});
+
+// --- sanitized properties and the key summary -------------------------------
+
+test('sanitize: trims whitespace, newlines, tabs and surrounding quotes, and nothing else', () => {
+  const { sanitizeProperty_ } = makeContext().ctx;
+  assert.equal(sanitizeProperty_('  abc123 \n'), 'abc123');
+  assert.equal(sanitizeProperty_('\tabc\r\n'), 'abc');
+  assert.equal(sanitizeProperty_('"abc"'), 'abc');
+  assert.equal(sanitizeProperty_("'abc'"), 'abc');
+  assert.equal(sanitizeProperty_(' "abc" \n'), 'abc');
+  assert.equal(sanitizeProperty_('"\'abc\'"'), 'abc');
+  assert.equal(sanitizeProperty_('"abc'), 'abc');
+  assert.equal(sanitizeProperty_('a"b c'), 'a"b c', 'characters inside are left alone');
+  assert.equal(sanitizeProperty_(''), '');
+  assert.equal(sanitizeProperty_('   '), '');
+  assert.equal(sanitizeProperty_('""'), '');
+  assert.equal(sanitizeProperty_(null), '');
+  assert.equal(sanitizeProperty_(undefined), '');
+});
+
+test('sanitize: a pasted FastField key, form id and user are cleaned before use', () => {
+  const env = makeContext();
+  Object.assign(env.props, {
+    FASTFIELD_API_KEY: '  "ff-key-123"\n',
+    FASTFIELD_FORM_ID: " '98765' ",
+    FASTFIELD_USER_ID: '\tdriver@recoverytowing.example \n',
+  });
+  assert.equal(env.ctx.dispatchToFastField_({ call_id: 'J', outcome: 1 }), 'FF-1001');
+  assertFastFieldHeaders(env.fetchCalls[0]);
+  const payload = JSON.parse(env.fetchCalls[0].options.payload);
+  assert.equal(payload.formId, 98765);
+  assert.deepEqual(payload.users, ['driver@recoverytowing.example']);
+});
+
+test('sanitize: a property that is only whitespace or quotes counts as missing', () => {
+  const env = configure(makeContext());
+  env.props.FASTFIELD_API_KEY = ' "" \n';
+  assert.equal(env.ctx.dispatchToFastField_({ call_id: 'J', outcome: 1 }), null);
+  assert.equal(env.fetchCalls.length, 0);
+  assert.ok(env.logs.warn.some((w) => w.includes('FASTFIELD_API_KEY')));
+});
+
+test('sanitize: API_SECRET with stray whitespace or quotes in Script Properties still authorizes the clean token', () => {
+  for (const stored of [API_SECRET + '\n', ' "' + API_SECRET + '" ', "'" + API_SECRET + "'"]) {
+    const env = makeContext();
+    env.props.API_SECRET = stored;
+    const res = post(env, { token: API_SECRET, call_id: 'X1', customer_phone: '916-555-0150' });
+    assert.equal(res.ok, true, JSON.stringify(stored) + ' ' + JSON.stringify(res));
+  }
+  const env = makeContext();
+  env.props.API_SECRET = '  ';
+  assert.equal(post(env, { token: API_SECRET, call_id: 'X1', customer_phone: '916-555-0150' }).code, 'SERVER_MISCONFIGURED');
+});
+
+test('testFastFieldDispatch: logs a safe summary of the key before any request', () => {
+  const env = configure(makeContext());
+  const key = '0123456789abcdef0123456789abcdef';
+  env.props.FASTFIELD_API_KEY = ' "' + key + '"\n';
+  fastFieldServer(env);
+  env.ctx.testFastFieldDispatch();
+  const log = env.logger.join('\n');
+  assert.ok(log.indexOf('Key Length') < log.indexOf('Step 1 of 2'), 'summary comes first');
+  assert.match(log, /Key Length: 32/);
+  assert.match(log, /Key Masked: 0123\.\.\.cdef/);
+  assert.match(log, /Is 32-character Hexadecimal: true/);
+  assert.match(log, /Contains Whitespace Before Trim: true \(removed before sending\)/);
+  assert.match(log, /Had Surrounding Quotes: true/);
+  assert.match(log, /Contains Whitespace Inside: false/);
+  assert.ok(!log.includes(key), 'the full key is never logged');
+  assert.equal(env.fetchCalls[0].options.headers['Ocp-Apim-Subscription-Key'], key, 'the cleaned key is what is sent');
+});
+
+test('testFastFieldDispatch: classifies other key formats, flags inner whitespace, and masks a short key', () => {
+  const info = makeContext().ctx.describeKey_;
+  assert.equal(info('abc', 'abc').masked, '(too short to show safely)');
+  assert.equal(info('x', 'ZXhhbXBsZQ.ZXhhbXBsZQ.ZXhhbXBsZQ').format, 'JWT-like (three dot-separated parts)');
+  assert.equal(info('x', 'AbC123xyz456QwErTy').format, 'alphanumeric');
+  assert.equal(info('x', 'ABCDEF0123').format, 'hexadecimal, 10 characters');
+  assert.equal(info('x', 'ab cd-ef!').format, 'other');
+  assert.equal(info('ab\ncd', 'ab\ncd').hasInternalWhitespace, true);
+  assert.equal(info('clean', 'clean').hadSurroundingWhitespace, false);
+  assert.equal(info('clean', 'clean').hadSurroundingQuotes, false);
 });
 
 // --- handleFastFieldWebhook_ -------------------------------------------------
