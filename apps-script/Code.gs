@@ -7,6 +7,7 @@
  *   ?source=website        Website form submission       token in body/query  (WEBSITE_SECRET)
  *   ?source=callrail       CallRail post-call webhook    token in query       (API_SECRET)
  *   ?source=ai             Mac Mini AI worker            token in JSON body   (API_SECRET)
+ *   ?source=fastfield      FastField return webhook      token in query       (API_SECRET)
  *   ?source=location       Customer location sharing     request_location / check_location use
  *                          (app) and a public landing    the API_SECRET; submit_location (from
  *                          page (customer's phone)       the landing page) is public but only
@@ -26,6 +27,8 @@
  *   AI worker      -> Caller_Tone, Mentioned_Damage, AI_Processed_At, Call_Intent, Admin_Summary
  *                     (status checks and admin inquiries), and Lead_Source only if still blank
  *                     after CallRail
+ *   FastField      -> FastField_Task_ID (written by the app sync when a won call is dispatched),
+ *                     Receipt_PDF_URL (written by the return webhook when the form is completed)
  */
 
 const CONFIG = Object.freeze({
@@ -44,15 +47,24 @@ const CONFIG = Object.freeze({
   ROW_GROWTH: 500,
   // How long a customer's shared location stays readable (and how long a link stays valid).
   LOCATION_TTL_SECONDS: 15 * 60,
+  // The one place the FastField dispatch address lives, in case the account uses another API version.
+  FASTFIELD_DISPATCH_URL: 'https://api.fastfieldforms.com/services/v1/dispatches',
+  FASTFIELD_LOCK_WAIT_MS: 30000,
+  // Phase 3 of a dispatch only stamps one cell, so it waits briefly.
+  FASTFIELD_STAMP_LOCK_WAIT_MS: 5000,
+  // How long a dispatch counts as in flight if its request never finishes.
+  FASTFIELD_INFLIGHT_SECONDS: 120,
+  // The webhook's phone fallback only considers calls logged this recently.
+  FASTFIELD_PHONE_WINDOW_MS: 24 * 60 * 60 * 1000,
 });
 
 // Location-sharing link tokens: lowercase letters and digits only, so one can be placed in a URL
 // or in page code without escaping.
 const LOCATION_TOKEN_RE = /^[a-z0-9]{8,32}$/;
 
-// 31 columns. Columns 1-21 are the dispatcher block (app/website writes, plus the computed miles);
-// 22-31 are automated ingestion (CallRail, then the AI worker), so a dispatcher write can never
-// land on an automated column. Lookups are by header name, never by position.
+// 33 columns. Columns 1-21 are the dispatcher block (app/website writes, plus the computed miles);
+// 22-31 are automated ingestion (CallRail, then the AI worker) and 32-33 are the FastField receipt
+// pipeline, so a dispatcher write can never land on an automated column. Lookups are by header name, never by position.
 const HEADERS = Object.freeze([
   'Call_ID', 'Date_Time', 'Customer_Phone', 'Caller_Type', 'Payer_Name',
   'Service_Requested', 'Vehicle_Year', 'Vehicle_Make', 'Vehicle_Model', 'Drivetrain',
@@ -62,11 +74,12 @@ const HEADERS = Object.freeze([
   'Lead_Source', 'Search_Keyword', 'Campaign_Name', 'Call_Duration_Sec', 'Call_Recording_URL',
   'Caller_Tone', 'Mentioned_Damage', 'AI_Processed_At',
   'Call_Intent', 'Admin_Summary',
+  'FastField_Task_ID', 'Receipt_PDF_URL',
 ]);
 
 // Columns added after the first release. A sheet that predates them gets them appended to its header
 // row automatically (see getCallLog_), so deploying new code never breaks an existing sheet.
-const AUTO_ADDED_HEADERS = Object.freeze(['Call_Intent', 'Admin_Summary']);
+const AUTO_ADDED_HEADERS = Object.freeze(['Call_Intent', 'Admin_Summary', 'FastField_Task_ID', 'Receipt_PDF_URL']);
 
 // JSON key (SCHEMA.md) -> sheet header. These are the dispatcher-owned columns.
 // Lead_Source is automated (CallRail, then AI fallback) and is deliberately absent here.
@@ -159,6 +172,9 @@ function doPost(e) {
         break;
       case 'location':
         result = handleLocation_(request.body);
+        break;
+      case 'fastfield':
+        result = handleFastFieldWebhook_(request.body);
         break;
       default:
         throw new ApiError('BAD_REQUEST', 'Unknown source "' + request.source + '".');
@@ -429,7 +445,8 @@ function handleDispatch_(body, origin) {
   const miles = computeMiles_(record, warnings);
   const updates = Object.assign({}, record, miles);
 
-  return withLock_(function () {
+  // Phase 1, under the lock: write the row. FastField_Task_ID stays blank for now.
+  const saved = withLock_(function () {
     const log = getCallLog_();
     const index = readIndex_(log);
 
@@ -449,15 +466,43 @@ function handleDispatch_(body, origin) {
       }
     }
 
+    // A won call becomes a FastField task for the driver, once. A row that already has a task id is
+    // never dispatched again (the app re-syncs a call), and so is one whose dispatch is in flight
+    // from another request. A failed dispatch leaves the id blank so the next sync retries it.
+    const existingTask = rowNum
+      ? String(log.sheet.getRange(rowNum, log.col.FastField_Task_ID + 1).getValue()).trim()
+      : '';
+    const wantsDispatch = origin === 'app' && !existingTask && isWon_(record.Outcome) &&
+      claimDispatch_(record.Call_ID);
+    if (!rowNum) {
+      updates.FastField_Task_ID = '';
+      updates.Receipt_PDF_URL = '';
+    }
+
     if (rowNum) {
       writeCells_(log, rowNum, updates);
     } else {
       rowNum = appendRecord_(log, updates);
       action = 'created';
     }
-
-    return { action: action, call_id: record.Call_ID, row: rowNum, warnings: warnings };
+    return { action: action, call_id: record.Call_ID, row: rowNum, dispatch: wantsDispatch };
   });
+
+  // Phase 2, no lock: the FastField request. A slow or hung FastField can no longer hold up
+  // CallRail webhooks, the AI worker or location polling.
+  if (saved.dispatch) {
+    try {
+      const taskId = dispatchToFastField_(callDataFromRecord_(record));
+      // Phase 3, a brief lock: stamp only the task id on the row.
+      if (taskId && !stampFastFieldTask_(record.Call_ID, taskId)) {
+        warnings.push('FastField task ' + taskId + ' was created but could not be saved to the row.');
+      }
+    } finally {
+      releaseDispatch_(record.Call_ID);
+    }
+  }
+
+  return { action: saved.action, call_id: saved.call_id, row: saved.row, warnings: warnings };
 }
 
 function normalizeDispatchRecord_(body, origin, warnings) {
@@ -913,12 +958,290 @@ function applyAiResult_(body) {
 }
 
 // ---------------------------------------------------------------------------
+// FastField Forms: dispatch a won call to the driver's iPad, and take the finished receipt back
+//
+// Out: a won call is posted to FastField as a task pre-filled with the job (dispatchToFastField_);
+//      the task id lands in FastField_Task_ID.
+// In:  when the driver submits the Recovery Towing Service Form, FastField calls
+//      ?source=fastfield&token=<API_SECRET>; the report's PDF link is saved to Receipt_PDF_URL.
+// ---------------------------------------------------------------------------
+
+const FASTFIELD_REQUIRED = Object.freeze(['FASTFIELD_API_KEY', 'FASTFIELD_FORM_ID', 'FASTFIELD_USER_ID']);
+
+/**
+ * Marks a call's dispatch as in flight (called with the sheet lock held). A second request for the
+ * same call that arrives while the first is still talking to FastField sees the mark and does not
+ * dispatch again. The mark expires by itself in case a request dies mid-way.
+ */
+function claimDispatch_(callId) {
+  const cache = CacheService.getScriptCache();
+  const key = 'ffd:' + callId;
+  if (cache.get(key) !== null) return false;
+  cache.put(key, '1', CONFIG.FASTFIELD_INFLIGHT_SECONDS);
+  return true;
+}
+
+function releaseDispatch_(callId) {
+  CacheService.getScriptCache().remove('ffd:' + callId);
+}
+
+/**
+ * Phase 3: a short lock just long enough to write the task id on the call's row (found again by
+ * Call_ID, since rows can move while FastField was answering). Never overwrites an id already there.
+ * Returns whether the id was saved; a busy sheet or a vanished row is logged with the id, not thrown,
+ * because the call itself is already saved.
+ */
+function stampFastFieldTask_(callId, taskId) {
+  try {
+    return withLock_(function () {
+      const log = getCallLog_();
+      const rowNum = findByCallId_(readIndex_(log), callId);
+      if (!rowNum) {
+        console.error('FastField task ' + taskId + ' created but call "' + callId + '" is not in the sheet.');
+        return false;
+      }
+      const cell = log.sheet.getRange(rowNum, log.col.FastField_Task_ID + 1);
+      if (String(cell.getValue()).trim() === '') writeCells_(log, rowNum, { FastField_Task_ID: taskId });
+      return true;
+    }, CONFIG.FASTFIELD_STAMP_LOCK_WAIT_MS);
+  } catch (err) {
+    console.error('FastField task ' + taskId + ' created for call "' + callId + '" but not saved to the sheet: ' + err);
+    return false;
+  }
+}
+
+function isWon_(outcome) {
+  return outcome === 1 || String(outcome === undefined || outcome === null ? '' : outcome).trim() === '1' ||
+    String(outcome === undefined || outcome === null ? '' : outcome).trim() === OUTCOME_WON;
+}
+
+/** The sheet record (header keys) back to the app's snake_case keys. */
+function callDataFromRecord_(rec) {
+  const out = {};
+  Object.keys(APP_FIELDS).forEach(function (key) {
+    if (rec[APP_FIELDS[key]] !== undefined) out[key] = rec[APP_FIELDS[key]];
+  });
+  return out;
+}
+
+/** The three FastField settings, or null (with a warning) when any is missing or blank. */
+function fastFieldConfig_() {
+  const props = PropertiesService.getScriptProperties();
+  const config = {};
+  const missing = [];
+  FASTFIELD_REQUIRED.forEach(function (name) {
+    const value = String(props.getProperty(name) || '').trim();
+    if (value) config[name] = value;
+    else missing.push(name);
+  });
+  if (missing.length) {
+    console.warn('FastField dispatch skipped: ' + missing.join(', ') + ' not set in Script Properties.');
+    return null;
+  }
+  return config;
+}
+
+/**
+ * Sends a won call to FastField as a pre-filled task and reports everything about the answer:
+ * { code, headers, text, parsed, id, error }. Returns null, after logging why, when nothing was
+ * sent (not won, or FastField not configured). Shared by dispatchToFastField_ and the manual
+ * testFastFieldDispatch diagnostic.
+ */
+function sendFastFieldDispatch_(callData) {
+  if (!callData || !isWon_(callData.outcome)) return null;
+  const config = fastFieldConfig_();
+  if (!config) return null;
+  const formId = Number(config.FASTFIELD_FORM_ID);
+  if (!isFinite(formId)) {
+    console.warn('FastField dispatch skipped: FASTFIELD_FORM_ID is not a number.');
+    return null;
+  }
+
+  const notes = callData.notes_comments === undefined || callData.notes_comments === null
+    ? '' : String(callData.notes_comments).trim();
+  const quote = callData.quoted_price ? 'Quoted: $' + callData.quoted_price : '';
+  const text = function (v) { return v === undefined || v === null ? '' : v; };
+  const payload = {
+    formId: formId,
+    assignedUserId: config.FASTFIELD_USER_ID,
+    fields: {
+      alpha_1: callData.call_id,
+      multiline_1: [notes, quote].filter(Boolean).join(' | '),
+      formattedinput_1: text(callData.customer_phone),
+      numeric_1: Number(callData.vehicle_year) || null,
+      alpha_3: text(callData.vehicle_make),
+      alpha_4: text(callData.vehicle_model),
+      alpha_9: text(callData.pickup_address),
+      alpha_13: text(callData.dropoff_address),
+      listpicker_2: text(callData.service_requested),
+    },
+  };
+
+  const result = { code: 0, headers: {}, text: '', parsed: null, id: '', error: '' };
+  try {
+    const response = UrlFetchApp.fetch(CONFIG.FASTFIELD_DISPATCH_URL, {
+      method: 'post',
+      contentType: 'application/json',
+      headers: { Authorization: 'Bearer ' + config.FASTFIELD_API_KEY },
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true,
+    });
+    result.code = response.getResponseCode();
+    result.text = String(response.getContentText());
+    if (typeof response.getAllHeaders === 'function') result.headers = response.getAllHeaders();
+    try { result.parsed = JSON.parse(result.text); } catch (_) { result.parsed = null; }
+    const found = result.parsed && (result.parsed.dispatchId || result.parsed.taskId);
+    if (found) result.id = String(found);
+  } catch (err) {
+    result.error = String(err && err.message ? err.message : err);
+  }
+  return result;
+}
+
+/**
+ * Posts a won call to FastField as a pre-filled task. Returns the task id, or null when the call
+ * was not won, FastField is not configured, or the request failed; the caller records the call
+ * either way, so nothing here throws.
+ */
+function dispatchToFastField_(callData) {
+  const result = sendFastFieldDispatch_(callData);
+  if (!result) return null;
+  if (result.error) {
+    console.error('FastField dispatch error: ' + result.error);
+    return null;
+  }
+  if (result.code !== 200 && result.code !== 201) {
+    console.error('FastField dispatch failed: HTTP ' + result.code + ' ' + result.text.slice(0, 500));
+    return null;
+  }
+  if (!result.id) {
+    console.error('FastField dispatch answered HTTP ' + result.code + ' without a dispatchId or taskId: ' + result.text.slice(0, 500));
+    return null;
+  }
+  return result.id;
+}
+
+/**
+ * Manual diagnostic: run it from the Apps Script editor to check the FastField credentials and the
+ * dispatch address with the live Script Properties. It sends a clearly marked TEST task and logs the
+ * HTTP status, the response headers and the parsed reply. It does not touch the Call Log. The task
+ * is real, though: it appears on the driver's FastField list, so delete it there afterwards.
+ */
+function testFastFieldDispatch() {
+  const callData = {
+    call_id: 'TEST-DISPATCH-001',
+    outcome: OUTCOME_WON,
+    customer_phone: '916-555-0100',
+    service_requested: 'Standard Tow',
+    vehicle_year: 2022,
+    vehicle_make: 'Honda',
+    vehicle_model: 'Civic',
+    pickup_address: 'Roseville, CA',
+    dropoff_address: 'Sacramento, CA',
+    quoted_price: 150,
+    notes_comments: 'TEST DISPATCH, safe to delete',
+  };
+  Logger.log('Sending a TEST task to FastField (it will show up on the driver\'s list; delete it afterwards).');
+  const result = sendFastFieldDispatch_(callData);
+  if (!result) {
+    Logger.log('Nothing was sent. Check the log above: FASTFIELD_API_KEY, FASTFIELD_FORM_ID and FASTFIELD_USER_ID must all be set in Script Properties.');
+    return null;
+  }
+  if (result.error) {
+    Logger.log('Request failed before FastField answered: ' + result.error);
+    return null;
+  }
+  Logger.log('HTTP status: ' + result.code);
+  Logger.log('Response headers: ' + JSON.stringify(result.headers));
+  if (result.parsed) Logger.log('Parsed response: ' + JSON.stringify(result.parsed));
+  else Logger.log('Response body (not JSON): ' + result.text.slice(0, 1000));
+  if (result.code === 200 || result.code === 201) {
+    Logger.log(result.id
+      ? 'OK. FastField created task ' + result.id + '.'
+      : 'FastField answered OK but the reply has no dispatchId or taskId; check the reply above.');
+  } else if (result.code === 401 || result.code === 403) {
+    Logger.log('Rejected: the API key was not accepted. Check FASTFIELD_API_KEY.');
+  } else if (result.code === 404) {
+    Logger.log('Not found: check the dispatch address (CONFIG.FASTFIELD_DISPATCH_URL) and FASTFIELD_FORM_ID.');
+  } else {
+    Logger.log('Rejected: see the reply above for FastField\'s reason.');
+  }
+  return result.parsed;
+}
+
+function firstString_(values) {
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i];
+    if (v !== undefined && v !== null && typeof v !== 'object' && String(v).trim() !== '') return String(v).trim();
+  }
+  return '';
+}
+
+/** The report's PDF link: a direct field, or the first PDF among the attached documents. */
+function extractReceiptUrl_(body, data) {
+  const direct = firstString_([data.pdfUrl, data.documentUrl, body.pdfUrl, body.documentUrl]);
+  if (direct) return direct;
+  const lists = [data.attachments, body.attachments, data.documents, body.documents, data.reports, body.reports];
+  for (let i = 0; i < lists.length; i++) {
+    if (!Array.isArray(lists[i])) continue;
+    for (let j = 0; j < lists[i].length; j++) {
+      const item = lists[i][j];
+      if (typeof item === 'string' && /\.pdf(\?|$)/i.test(item)) return item.trim();
+      if (item && typeof item === 'object') {
+        const url = firstString_([item.pdfUrl, item.documentUrl, item.url, item.href, item.link]);
+        const type = String(item.contentType || item.mimeType || item.type || '').toLowerCase();
+        if (url && (type.indexOf('pdf') !== -1 || /\.pdf(\?|$)/i.test(url))) return url;
+      }
+    }
+  }
+  return '';
+}
+
+/**
+ * FastField's "form completed" call: save the report PDF link on the matching call. Matches by
+ * Call_ID (the form's Job Number), else by the customer's last 10 digits among calls logged in the
+ * last 24 hours. Writes only Receipt_PDF_URL.
+ */
+function handleFastFieldWebhook_(body) {
+  const data = body.data && typeof body.data === 'object' && !Array.isArray(body.data) ? body.data : body;
+  const callId = firstString_([data.alpha_1, body.alpha_1, body.jobId, body.callId]);
+  const phone = phoneKey_(firstString_([data.formattedinput_1, body.formattedinput_1, body.customerPhone, body.customer_phone]));
+  const url = extractReceiptUrl_(body, data);
+
+  if (!callId && !phone) throw new ApiError('BAD_REQUEST', 'No job number or customer phone in the payload.');
+  if (!/^https:\/\//i.test(url)) throw new ApiError('BAD_REQUEST', 'No https report link (pdfUrl, documentUrl or a PDF attachment) in the payload.');
+
+  return withLock_(function () {
+    const log = getCallLog_();
+    const index = readIndex_(log);
+
+    let rowNum = findByCallId_(index, callId);
+    if (!rowNum && phone) {
+      const now = Date.now();
+      const recent = index
+        .filter(function (r) {
+          return r.phoneKey === phone && r.time !== null && r.time <= now && now - r.time <= CONFIG.FASTFIELD_PHONE_WINDOW_MS;
+        })
+        .sort(function (a, b) { return b.time - a.time; });
+      if (recent.length) rowNum = recent[0].rowNum;
+    }
+    if (!rowNum) {
+      console.warn('FastField receipt: no call found for job "' + callId + '" / phone "' + phone + '".');
+      throw new ApiError('NOT_FOUND', 'Call record not found');
+    }
+
+    writeCells_(log, rowNum, { Receipt_PDF_URL: url });
+    return { action: 'receipt_saved', row: rowNum };
+  }, CONFIG.FASTFIELD_LOCK_WAIT_MS);
+}
+
+// ---------------------------------------------------------------------------
 // Sheet access
 // ---------------------------------------------------------------------------
 
-function withLock_(fn) {
+function withLock_(fn, waitMs) {
   const lock = LockService.getScriptLock();
-  if (!lock.tryLock(CONFIG.LOCK_WAIT_MS)) {
+  if (!lock.tryLock(waitMs || CONFIG.LOCK_WAIT_MS)) {
     throw new ApiError('BUSY', 'Sheet is busy; retry shortly.');
   }
   try {
@@ -933,6 +1256,15 @@ function withLock_(fn) {
 function getCallLog_() {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.CALL_LOG_SHEET);
   if (!sheet) throw new ApiError('SERVER_MISCONFIGURED', 'Missing "' + CONFIG.CALL_LOG_SHEET + '" tab.');
+  return ensureSchema_(sheet);
+}
+
+/**
+ * Reads the header row and appends any AUTO_ADDED_HEADERS the sheet lacks (a 31-column sheet gets
+ * FastField_Task_ID and Receipt_PDF_URL as columns 32 and 33). Any other missing header is a
+ * configuration error. Returns the sheet, a header -> column index map and the width.
+ */
+function ensureSchema_(sheet) {
   let width = sheet.getLastColumn();
   const header = width ? sheet.getRange(1, 1, 1, width).getValues()[0] : [];
   const col = {};
@@ -1166,6 +1498,9 @@ function setup() {
   const props = PropertiesService.getScriptProperties();
   ['API_SECRET', 'WEBSITE_SECRET'].forEach(function (name) {
     console.log(name + (props.getProperty(name) ? ' is set.' : ' is NOT set — add it under Project Settings > Script Properties.'));
+  });
+  FASTFIELD_REQUIRED.forEach(function (name) {
+    console.log(name + (props.getProperty(name) ? ' is set.' : ' is not set (optional): won calls will not be dispatched to FastField.'));
   });
 }
 

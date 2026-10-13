@@ -1,6 +1,6 @@
 # The Central Data Schema (Google Sheets & JSON)
 
-The Google Sheet consists of exactly 31 columns. Do not deviate from these keys in the Apps Script or the iOS SwiftData models. 
+The Google Sheet consists of exactly 33 columns. Do not deviate from these keys in the Apps Script or the iOS SwiftData models. 
 
 ## The JSON Payload (from iOS to Apps Script)
 When the iOS app syncs, it must POST this exact `snake_case` structure:
@@ -33,7 +33,7 @@ When the iOS app syncs, it must POST this exact `snake_case` structure:
 - `customer_phone` is required in the iOS payload: at least 10 digits once formatting is stripped. A sync without it is rejected with `BAD_REQUEST`. It is stored as `916-555-0199`.
 - `date_time` and `AI_Processed_At` are stored as whole seconds (no milliseconds) and displayed as `yyyy-mm-dd hh:mm:ss` in the sheet's time zone (Pacific), e.g. `2026-10-02 08:56:04`.
 
-## Column layout (31 columns)
+## Column layout (33 columns)
 Columns 1–21 are the dispatcher block. Everything after is automated ingestion, so a dispatcher write can never land on an automated column.
 
 | # | Columns | Written by |
@@ -42,6 +42,8 @@ Columns 1–21 are the dispatcher block. Everything after is automated ingestion
 | 22 | `Lead_Source` | CallRail attribution; the Phase 3 AI fills it only if still blank. Website leads are tagged `Website Form`. |
 | 23–26 | `Search_Keyword`, `Campaign_Name`, `Call_Duration_Sec`, `Call_Recording_URL` | CallRail webhook |
 | 27–31 | `Caller_Tone`, `Mentioned_Damage`, `AI_Processed_At`, `Call_Intent`, `Admin_Summary` | Phase 3 Mac Mini AI worker (`worker/`). Fill-only-if-blank: it never overwrites an existing value. |
+| 32 | `FastField_Task_ID` | Text. The Apps Script app sync, when a call is saved with `Outcome = 1 - Won / Booked` and FastField is configured: the id FastField returns for the task it created for the driver. Blank when the call was lost, FastField is not configured, or the dispatch failed (the next sync of that call retries). Never overwritten once set. |
+| 33 | `Receipt_PDF_URL` | URL (https). The FastField return webhook (`?source=fastfield`), when the driver submits the Recovery Towing Service Form: the link to the completed report PDF. Initialized to an empty string when a row is created, so it stays blank until the receipt arrives. |
 
 `Call_Intent` picklist: `NEW_LEAD`, `STATUS_CHECK`, `ADMIN_INQUIRY`. **Only `NEW_LEAD` rows are sales opportunities: filter on `Call_Intent = NEW_LEAD` for conversion and pricing analysis.**
 - `NEW_LEAD`: a driver, adjuster, motor club, shop or fleet asking for a tow, a price or availability, or booking a job.
@@ -49,7 +51,7 @@ Columns 1–21 are the dispatcher block. Everything after is automated ingestion
 - `ADMIN_INQUIRY`: lot or gate hours, storage fees, release requirements, general vendor calls.
 - **Blank** means not classified: rows from before this column existed, and calls that were never a conversation (unanswered, dropped, automated), which already carry `N/A` in `Caller_Tone`.
 
-For `STATUS_CHECK` and `ADMIN_INQUIRY`, `Caller_Tone` and `Mentioned_Damage` are `N/A` (they are not sales calls), `Lead_Source` is left as CallRail set it (never guessed), and `Admin_Summary` holds one sentence about the call, e.g. "Adjuster checking delivery status on 2019 Civic at Copart." `Admin_Summary` is blank for `NEW_LEAD`. A sheet created before these two columns gets them appended to its header row automatically the first time the new Apps Script runs.
+For `STATUS_CHECK` and `ADMIN_INQUIRY`, `Caller_Tone` and `Mentioned_Damage` are `N/A` (they are not sales calls), `Lead_Source` is left as CallRail set it (never guessed), and `Admin_Summary` holds one sentence about the call, e.g. "Adjuster checking delivery status on 2019 Civic at Copart." `Admin_Summary` is blank for `NEW_LEAD`. A sheet created before these columns gets them appended to its header row automatically the first time the new Apps Script runs (a 31-column sheet gains `FastField_Task_ID` and `Receipt_PDF_URL` as columns 32 and 33).
 
 `Caller_Tone` picklist: `Calm`, `Stressed`, `Frustrated`, `Angry`, `Confused`, `Rushed`, `Price Shopping`, `Cooperative`, `N/A`. **`N/A` in `Caller_Tone` and `Mentioned_Damage` marks a call with no genuine two-way conversation** (unanswered, dropped, or a recording of an automated system). Those rows have `AI_Processed_At` set and are not analyzed. Filter on it when building a dataset. It is different from `Mentioned_Damage = None`, which is a real call where no damage was mentioned. `Mentioned_Damage` is free text (short phrases, comma-separated) or `None`.
 

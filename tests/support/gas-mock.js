@@ -78,22 +78,57 @@ function makeContext(seed) {
   const cache = new Map();
   const cacheTtls = new Map();
   const mapsCalls = [];
+  // console.warn / console.error output, for tests that assert on logging.
+  const logs = { warn: [], error: [] };
+  // Script Properties, editable by a test; FASTFIELD_* are unset by default (FastField off).
+  const props = { API_SECRET, WEBSITE_SECRET };
+  // Every UrlFetchApp request, and what to answer with (a test can replace `respond`).
+  const fetchCalls = [];
+  // Whether the sheet lock is held right now, how long each acquisition was willing to wait, and a
+  // hook for a test to refuse a particular wait.
+  const lock = { held: false, waits: [], deny: () => false };
+  const logger = [];
+  const fetcher = { respond: () => ({ code: 200, body: JSON.stringify({ dispatchId: 'FF-1001' }) }) };
   const geocodeCalls = [];
   const ctx = {
-    console: { log() {}, warn() {}, error: console.error },
+    console: { log() {}, warn: (...a) => logs.warn.push(a.join(' ')), error: (...a) => logs.error.push(a.join(' ')) },
     SpreadsheetApp: { getActiveSpreadsheet: () => ss, flush() {} },
-    LockService: { getScriptLock: () => ({ tryLock: () => true, releaseLock() {} }) },
+    LockService: {
+      getScriptLock: () => ({
+        tryLock: (ms) => {
+          lock.waits.push(ms);
+          if (lock.deny(ms)) return false;
+          lock.held = true;
+          return true;
+        },
+        releaseLock() { lock.held = false; },
+      }),
+    },
     PropertiesService: {
       getScriptProperties: () => ({
-        getProperty: (k) => ({ API_SECRET, WEBSITE_SECRET })[k] || null,
+        getProperty: (k) => props[k] || null,
       }),
+    },
+    UrlFetchApp: {
+      fetch: (url, options) => {
+        fetchCalls.push({ url, options, lockHeld: lock.held });
+        const answer = fetcher.respond(url, options);
+        if (answer instanceof Error) throw answer;
+        return {
+          getResponseCode: () => answer.code,
+          getContentText: () => answer.body,
+          getAllHeaders: () => answer.headers || { 'Content-Type': 'application/json' },
+        };
+      },
     },
     CacheService: {
       getScriptCache: () => ({
         get: (k) => (cache.has(k) ? cache.get(k) : null),
         put: (k, v, ttl) => { cache.set(k, v); cacheTtls.set(k, ttl); },
+        remove: (k) => { cache.delete(k); },
       }),
     },
+    Logger: { log: (...a) => logger.push(a.join(' ')) },
     ScriptApp: { getService: () => ({ getUrl: () => 'http://127.0.0.1:8787/exec' }) },
     HtmlService: {
       createHtmlOutput: (html) => {
@@ -148,6 +183,7 @@ function makeContext(seed) {
   if (seed) seed(sheets['Call Log']);
   return {
     ctx, sheet: sheets['Call Log'], ref: sheets['Reference Data'], mapsCalls,
+    props, fetchCalls, fetcher, logs, lock, logger,
     cache, cacheTtls, geocodeCalls,
     /** Simulates the 15 minutes passing. */
     expireCache: () => cache.clear(),
