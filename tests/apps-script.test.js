@@ -50,7 +50,7 @@ const CR_QUERY = { source: 'callrail', token: API_SECRET };
 
 test('setup writes headers and reference data incl. Website Form', () => {
   const env = makeContext();
-  assert.equal(env.sheet.data[0].length, 31);
+  assert.equal(env.sheet.data[0].length, 33);
   assert.ok(!env.sheet.data[0].includes('Urgency_Level'));
   const leadCol = env.ref.data[0].indexOf('Lead_Source');
   assert.ok(env.ref.data.some((r) => r[leadCol] === 'Website Form'));
@@ -959,7 +959,7 @@ test('intent: a summary may be added later to an existing operational row, but n
   assert.equal(rowObj(env, cr.row).Admin_Summary, 'Customer asking about storage gate hours.');
 });
 
-test('migration: a sheet with the original 29 headers gets Call_Intent and Admin_Summary added, nothing else moves', () => {
+test('migration: a sheet with the original 29 headers gets the four newer columns added, nothing else moves', () => {
   const env = makeContext();
   const first = post(env, appPayload());
   assert.equal(first.ok, true);
@@ -969,11 +969,11 @@ test('migration: a sheet with the original 29 headers gets Call_Intent and Admin
 
   const second = post(env, appPayload({ call_id: 'B1B2C3D4-0000-4000-8000-000000000002', customer_phone: '916-555-0102' }));
   assert.equal(second.ok, true, JSON.stringify(second));
-  assert.deepEqual(env.sheet.data[0].slice(29), ['Call_Intent', 'Admin_Summary']);
+  assert.deepEqual(env.sheet.data[0].slice(29), ['Call_Intent', 'Admin_Summary', 'FastField_Task_ID', 'Receipt_PDF_URL']);
   assert.equal(JSON.stringify(env.sheet.data[1].slice(0, 29)), before, 'existing rows are untouched');
-  assert.equal(env.sheet.data[0].length, 31, 'added once, not on every request');
+  assert.equal(env.sheet.data[0].length, 33, 'added once, not on every request');
   post(env, appPayload({ call_id: 'C1B2C3D4-0000-4000-8000-000000000003', customer_phone: '916-555-0103' }));
-  assert.equal(env.sheet.data[0].length, 31);
+  assert.equal(env.sheet.data[0].length, 33);
 });
 
 test('migration: any other missing header is still a configuration error', () => {

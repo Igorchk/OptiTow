@@ -78,15 +78,30 @@ function makeContext(seed) {
   const cache = new Map();
   const cacheTtls = new Map();
   const mapsCalls = [];
+  // console.warn / console.error output, for tests that assert on logging.
+  const logs = { warn: [], error: [] };
+  // Script Properties, editable by a test; FASTFIELD_* are unset by default (FastField off).
+  const props = { API_SECRET, WEBSITE_SECRET };
+  // Every UrlFetchApp request, and what to answer with (a test can replace `respond`).
+  const fetchCalls = [];
+  const fetcher = { respond: () => ({ code: 200, body: JSON.stringify({ dispatchId: 'FF-1001' }) }) };
   const geocodeCalls = [];
   const ctx = {
-    console: { log() {}, warn() {}, error: console.error },
+    console: { log() {}, warn: (...a) => logs.warn.push(a.join(' ')), error: (...a) => logs.error.push(a.join(' ')) },
     SpreadsheetApp: { getActiveSpreadsheet: () => ss, flush() {} },
     LockService: { getScriptLock: () => ({ tryLock: () => true, releaseLock() {} }) },
     PropertiesService: {
       getScriptProperties: () => ({
-        getProperty: (k) => ({ API_SECRET, WEBSITE_SECRET })[k] || null,
+        getProperty: (k) => props[k] || null,
       }),
+    },
+    UrlFetchApp: {
+      fetch: (url, options) => {
+        fetchCalls.push({ url, options });
+        const answer = fetcher.respond(url, options);
+        if (answer instanceof Error) throw answer;
+        return { getResponseCode: () => answer.code, getContentText: () => answer.body };
+      },
     },
     CacheService: {
       getScriptCache: () => ({
@@ -148,6 +163,7 @@ function makeContext(seed) {
   if (seed) seed(sheets['Call Log']);
   return {
     ctx, sheet: sheets['Call Log'], ref: sheets['Reference Data'], mapsCalls,
+    props, fetchCalls, fetcher, logs,
     cache, cacheTtls, geocodeCalls,
     /** Simulates the 15 minutes passing. */
     expireCache: () => cache.clear(),

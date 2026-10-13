@@ -74,17 +74,17 @@ test('vehicles.json has 15 makes, Tesla models per APP_SPEC', () => {
   for (const v of vehicles) assert.ok(v.models.length > 0 && !v.models.includes('Other'), v.make);
 });
 
-test('column layout: 31 columns, Urgency_Level retired, dispatcher block is columns 1-21', () => {
+test('column layout: 33 columns, Urgency_Level retired, dispatcher block is columns 1-21', () => {
   const { APP_FIELDS, HEADERS } = loadGs();
-  assert.equal(HEADERS.length, 31);
-  assert.equal(new Set(HEADERS).size, 31);
+  assert.equal(HEADERS.length, 33);
+  assert.equal(new Set(HEADERS).size, 33);
   assert.ok(!HEADERS.includes('Urgency_Level'));
   // Everything the app/website may write (plus the two computed mileage columns) is exactly the
   // first 21 columns; everything after is automated, starting with Lead_Source.
   const dispatcher = [...Object.values(APP_FIELDS), 'Loaded_Miles', 'Deadhead_Est_Miles'];
   assert.deepEqual([...dispatcher].sort(), [...HEADERS].slice(0, 21).sort());
   assert.deepEqual([...HEADERS].slice(21, 26), ['Lead_Source', 'Search_Keyword', 'Campaign_Name', 'Call_Duration_Sec', 'Call_Recording_URL']);
-  assert.deepEqual([...HEADERS].slice(26), ['Caller_Tone', 'Mentioned_Damage', 'AI_Processed_At', 'Call_Intent', 'Admin_Summary']);
+  assert.deepEqual([...HEADERS].slice(26), ['Caller_Tone', 'Mentioned_Damage', 'AI_Processed_At', 'Call_Intent', 'Admin_Summary', 'FastField_Task_ID', 'Receipt_PDF_URL']);
 });
 
 test('worker/schema.py picklists == Apps Script ENUMS (Caller_Tone, Lead_Source, Call_Intent)', () => {
