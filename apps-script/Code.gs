@@ -50,6 +50,10 @@ const CONFIG = Object.freeze({
   // The one place the FastField dispatch address lives, in case the account uses another API version.
   FASTFIELD_DISPATCH_URL: 'https://api.fastfieldforms.com/services/v1/dispatches',
   FASTFIELD_LOCK_WAIT_MS: 30000,
+  // Phase 3 of a dispatch only stamps one cell, so it waits briefly.
+  FASTFIELD_STAMP_LOCK_WAIT_MS: 5000,
+  // How long a dispatch counts as in flight if its request never finishes.
+  FASTFIELD_INFLIGHT_SECONDS: 120,
   // The webhook's phone fallback only considers calls logged this recently.
   FASTFIELD_PHONE_WINDOW_MS: 24 * 60 * 60 * 1000,
 });
@@ -441,7 +445,8 @@ function handleDispatch_(body, origin) {
   const miles = computeMiles_(record, warnings);
   const updates = Object.assign({}, record, miles);
 
-  return withLock_(function () {
+  // Phase 1, under the lock: write the row. FastField_Task_ID stays blank for now.
+  const saved = withLock_(function () {
     const log = getCallLog_();
     const index = readIndex_(log);
 
@@ -462,17 +467,15 @@ function handleDispatch_(body, origin) {
     }
 
     // A won call becomes a FastField task for the driver, once. A row that already has a task id is
-    // never dispatched again (the app re-syncs a call), and a failed dispatch leaves the id blank so
-    // the next sync retries it. Dispatch trouble never blocks the row.
+    // never dispatched again (the app re-syncs a call), and so is one whose dispatch is in flight
+    // from another request. A failed dispatch leaves the id blank so the next sync retries it.
     const existingTask = rowNum
       ? String(log.sheet.getRange(rowNum, log.col.FastField_Task_ID + 1).getValue()).trim()
       : '';
-    if (origin === 'app' && !existingTask && isWon_(record.Outcome)) {
-      const taskId = dispatchToFastField_(callDataFromRecord_(record));
-      if (taskId) updates.FastField_Task_ID = taskId;
-    }
+    const wantsDispatch = origin === 'app' && !existingTask && isWon_(record.Outcome) &&
+      claimDispatch_(record.Call_ID);
     if (!rowNum) {
-      if (updates.FastField_Task_ID === undefined) updates.FastField_Task_ID = '';
+      updates.FastField_Task_ID = '';
       updates.Receipt_PDF_URL = '';
     }
 
@@ -482,9 +485,24 @@ function handleDispatch_(body, origin) {
       rowNum = appendRecord_(log, updates);
       action = 'created';
     }
-
-    return { action: action, call_id: record.Call_ID, row: rowNum, warnings: warnings };
+    return { action: action, call_id: record.Call_ID, row: rowNum, dispatch: wantsDispatch };
   });
+
+  // Phase 2, no lock: the FastField request. A slow or hung FastField can no longer hold up
+  // CallRail webhooks, the AI worker or location polling.
+  if (saved.dispatch) {
+    try {
+      const taskId = dispatchToFastField_(callDataFromRecord_(record));
+      // Phase 3, a brief lock: stamp only the task id on the row.
+      if (taskId && !stampFastFieldTask_(record.Call_ID, taskId)) {
+        warnings.push('FastField task ' + taskId + ' was created but could not be saved to the row.');
+      }
+    } finally {
+      releaseDispatch_(record.Call_ID);
+    }
+  }
+
+  return { action: saved.action, call_id: saved.call_id, row: saved.row, warnings: warnings };
 }
 
 function normalizeDispatchRecord_(body, origin, warnings) {
@@ -950,6 +968,48 @@ function applyAiResult_(body) {
 
 const FASTFIELD_REQUIRED = Object.freeze(['FASTFIELD_API_KEY', 'FASTFIELD_FORM_ID', 'FASTFIELD_USER_ID']);
 
+/**
+ * Marks a call's dispatch as in flight (called with the sheet lock held). A second request for the
+ * same call that arrives while the first is still talking to FastField sees the mark and does not
+ * dispatch again. The mark expires by itself in case a request dies mid-way.
+ */
+function claimDispatch_(callId) {
+  const cache = CacheService.getScriptCache();
+  const key = 'ffd:' + callId;
+  if (cache.get(key) !== null) return false;
+  cache.put(key, '1', CONFIG.FASTFIELD_INFLIGHT_SECONDS);
+  return true;
+}
+
+function releaseDispatch_(callId) {
+  CacheService.getScriptCache().remove('ffd:' + callId);
+}
+
+/**
+ * Phase 3: a short lock just long enough to write the task id on the call's row (found again by
+ * Call_ID, since rows can move while FastField was answering). Never overwrites an id already there.
+ * Returns whether the id was saved; a busy sheet or a vanished row is logged with the id, not thrown,
+ * because the call itself is already saved.
+ */
+function stampFastFieldTask_(callId, taskId) {
+  try {
+    return withLock_(function () {
+      const log = getCallLog_();
+      const rowNum = findByCallId_(readIndex_(log), callId);
+      if (!rowNum) {
+        console.error('FastField task ' + taskId + ' created but call "' + callId + '" is not in the sheet.');
+        return false;
+      }
+      const cell = log.sheet.getRange(rowNum, log.col.FastField_Task_ID + 1);
+      if (String(cell.getValue()).trim() === '') writeCells_(log, rowNum, { FastField_Task_ID: taskId });
+      return true;
+    }, CONFIG.FASTFIELD_STAMP_LOCK_WAIT_MS);
+  } catch (err) {
+    console.error('FastField task ' + taskId + ' created for call "' + callId + '" but not saved to the sheet: ' + err);
+    return false;
+  }
+}
+
 function isWon_(outcome) {
   return outcome === 1 || String(outcome === undefined || outcome === null ? '' : outcome).trim() === '1' ||
     String(outcome === undefined || outcome === null ? '' : outcome).trim() === OUTCOME_WON;
@@ -982,11 +1042,12 @@ function fastFieldConfig_() {
 }
 
 /**
- * Posts a won call to FastField as a pre-filled task. Returns the task id, or null when the call
- * was not won, FastField is not configured, or the request failed; the caller records the call
- * either way, so nothing here throws.
+ * Sends a won call to FastField as a pre-filled task and reports everything about the answer:
+ * { code, headers, text, parsed, id, error }. Returns null, after logging why, when nothing was
+ * sent (not won, or FastField not configured). Shared by dispatchToFastField_ and the manual
+ * testFastFieldDispatch diagnostic.
  */
-function dispatchToFastField_(callData) {
+function sendFastFieldDispatch_(callData) {
   if (!callData || !isWon_(callData.outcome)) return null;
   const config = fastFieldConfig_();
   if (!config) return null;
@@ -1016,6 +1077,7 @@ function dispatchToFastField_(callData) {
     },
   };
 
+  const result = { code: 0, headers: {}, text: '', parsed: null, id: '', error: '' };
   try {
     const response = UrlFetchApp.fetch(CONFIG.FASTFIELD_DISPATCH_URL, {
       method: 'post',
@@ -1024,24 +1086,87 @@ function dispatchToFastField_(callData) {
       payload: JSON.stringify(payload),
       muteHttpExceptions: true,
     });
-    const code = response.getResponseCode();
-    const bodyText = response.getContentText();
-    if (code !== 200 && code !== 201) {
-      console.error('FastField dispatch failed: HTTP ' + code + ' ' + String(bodyText).slice(0, 500));
-      return null;
-    }
-    let parsed = null;
-    try { parsed = JSON.parse(bodyText); } catch (_) { parsed = null; }
-    const id = parsed && (parsed.dispatchId || parsed.taskId);
-    if (!id) {
-      console.error('FastField dispatch answered HTTP ' + code + ' without a dispatchId or taskId: ' + String(bodyText).slice(0, 500));
-      return null;
-    }
-    return String(id);
+    result.code = response.getResponseCode();
+    result.text = String(response.getContentText());
+    if (typeof response.getAllHeaders === 'function') result.headers = response.getAllHeaders();
+    try { result.parsed = JSON.parse(result.text); } catch (_) { result.parsed = null; }
+    const found = result.parsed && (result.parsed.dispatchId || result.parsed.taskId);
+    if (found) result.id = String(found);
   } catch (err) {
-    console.error('FastField dispatch error: ' + err);
+    result.error = String(err && err.message ? err.message : err);
+  }
+  return result;
+}
+
+/**
+ * Posts a won call to FastField as a pre-filled task. Returns the task id, or null when the call
+ * was not won, FastField is not configured, or the request failed; the caller records the call
+ * either way, so nothing here throws.
+ */
+function dispatchToFastField_(callData) {
+  const result = sendFastFieldDispatch_(callData);
+  if (!result) return null;
+  if (result.error) {
+    console.error('FastField dispatch error: ' + result.error);
     return null;
   }
+  if (result.code !== 200 && result.code !== 201) {
+    console.error('FastField dispatch failed: HTTP ' + result.code + ' ' + result.text.slice(0, 500));
+    return null;
+  }
+  if (!result.id) {
+    console.error('FastField dispatch answered HTTP ' + result.code + ' without a dispatchId or taskId: ' + result.text.slice(0, 500));
+    return null;
+  }
+  return result.id;
+}
+
+/**
+ * Manual diagnostic: run it from the Apps Script editor to check the FastField credentials and the
+ * dispatch address with the live Script Properties. It sends a clearly marked TEST task and logs the
+ * HTTP status, the response headers and the parsed reply. It does not touch the Call Log. The task
+ * is real, though: it appears on the driver's FastField list, so delete it there afterwards.
+ */
+function testFastFieldDispatch() {
+  const callData = {
+    call_id: 'TEST-DISPATCH-001',
+    outcome: OUTCOME_WON,
+    customer_phone: '916-555-0100',
+    service_requested: 'Standard Tow',
+    vehicle_year: 2022,
+    vehicle_make: 'Honda',
+    vehicle_model: 'Civic',
+    pickup_address: 'Roseville, CA',
+    dropoff_address: 'Sacramento, CA',
+    quoted_price: 150,
+    notes_comments: 'TEST DISPATCH, safe to delete',
+  };
+  Logger.log('Sending a TEST task to FastField (it will show up on the driver\'s list; delete it afterwards).');
+  const result = sendFastFieldDispatch_(callData);
+  if (!result) {
+    Logger.log('Nothing was sent. Check the log above: FASTFIELD_API_KEY, FASTFIELD_FORM_ID and FASTFIELD_USER_ID must all be set in Script Properties.');
+    return null;
+  }
+  if (result.error) {
+    Logger.log('Request failed before FastField answered: ' + result.error);
+    return null;
+  }
+  Logger.log('HTTP status: ' + result.code);
+  Logger.log('Response headers: ' + JSON.stringify(result.headers));
+  if (result.parsed) Logger.log('Parsed response: ' + JSON.stringify(result.parsed));
+  else Logger.log('Response body (not JSON): ' + result.text.slice(0, 1000));
+  if (result.code === 200 || result.code === 201) {
+    Logger.log(result.id
+      ? 'OK. FastField created task ' + result.id + '.'
+      : 'FastField answered OK but the reply has no dispatchId or taskId; check the reply above.');
+  } else if (result.code === 401 || result.code === 403) {
+    Logger.log('Rejected: the API key was not accepted. Check FASTFIELD_API_KEY.');
+  } else if (result.code === 404) {
+    Logger.log('Not found: check the dispatch address (CONFIG.FASTFIELD_DISPATCH_URL) and FASTFIELD_FORM_ID.');
+  } else {
+    Logger.log('Rejected: see the reply above for FastField\'s reason.');
+  }
+  return result.parsed;
 }
 
 function firstString_(values) {

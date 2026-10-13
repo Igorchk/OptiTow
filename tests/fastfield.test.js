@@ -201,6 +201,152 @@ test('app sync: an existing task id and receipt are never blanked by a later syn
   assert.equal(row.Quoted_Price, 300);
 });
 
+// --- two-phase lock ----------------------------------------------------------
+
+test('lock: FastField is called with the sheet lock released, after the row is already saved', () => {
+  const env = configure(makeContext());
+  let seenAtFetch = null;
+  env.fetcher.respond = () => {
+    seenAtFetch = { held: env.lock.held, rows: env.sheet.getLastRow() - 1, row: rowObj(env, 2) };
+    return { code: 200, body: JSON.stringify({ dispatchId: 'FF-9' }) };
+  };
+  const res = post(env, appPayload());
+  assert.equal(res.ok, true);
+  assert.equal(seenAtFetch.held, false, 'no lock during the network call');
+  assert.equal(env.fetchCalls[0].lockHeld, false);
+  assert.equal(seenAtFetch.rows, 1, 'the row was written before FastField was asked');
+  assert.equal(seenAtFetch.row.Call_ID, 'JOB-0001');
+  assert.equal(seenAtFetch.row.FastField_Task_ID, '', 'id is blank until phase 3');
+  assert.equal(rowObj(env, res.row).FastField_Task_ID, 'FF-9');
+  assert.equal(env.lock.held, false, 'lock released at the end');
+});
+
+test('lock: the stamp takes a short lock (5 s) and only writes the task id', () => {
+  const env = configure(makeContext());
+  post(env, appPayload());
+  assert.deepEqual(env.lock.waits, [20000, 5000]);
+  const before = rowObj(env, 2);
+  assert.equal(before.FastField_Task_ID, 'FF-1001');
+  assert.equal(before.Quoted_Price, 285);
+});
+
+test('lock: no dispatch means no second lock', () => {
+  const env = configure(makeContext());
+  post(env, appPayload({ outcome: LOST }));
+  assert.deepEqual(env.lock.waits, [20000]);
+  const bare = makeContext();
+  post(bare, appPayload());
+  assert.deepEqual(bare.lock.waits, [20000]);
+});
+
+test('lock: a second sync of the same call during the FastField request does not dispatch again', () => {
+  const env = configure(makeContext());
+  let nested = null;
+  env.fetcher.respond = () => {
+    if (!nested) nested = post(env, appPayload({ notes_comments: 'edited while FastField was busy' }));
+    return { code: 200, body: JSON.stringify({ dispatchId: 'FF-5' }) };
+  };
+  const res = post(env, appPayload());
+  assert.equal(nested.ok, true);
+  assert.equal(env.fetchCalls.length, 1, 'only the first request talks to FastField');
+  assert.equal(rowObj(env, res.row).FastField_Task_ID, 'FF-5');
+  assert.equal(rowObj(env, res.row).Notes_Comments, 'edited while FastField was busy');
+  assert.equal(dataRowCount(env), 1);
+});
+
+test('lock: another call is saved while FastField is slow, and a failed dispatch frees the next sync', () => {
+  const env = configure(makeContext());
+  let other = null;
+  env.fetcher.respond = () => {
+    if (!other) other = post(env, appPayload({ call_id: 'JOB-0002', customer_phone: '916-555-0177', outcome: LOST }));
+    return { code: 500, body: 'down' };
+  };
+  post(env, appPayload());
+  assert.equal(other.ok, true, 'the sheet was not locked while FastField was being asked');
+  assert.equal(dataRowCount(env), 2);
+  env.fetcher.respond = () => ({ code: 200, body: JSON.stringify({ dispatchId: 'FF-6' }) });
+  const retry = post(env, appPayload());
+  assert.equal(rowObj(env, retry.row).FastField_Task_ID, 'FF-6', 'the in-flight mark was released after the failure');
+});
+
+test('lock: the in-flight mark is released even if the request throws', () => {
+  const env = configure(makeContext());
+  env.fetcher.respond = () => new Error('boom');
+  const first = post(env, appPayload());
+  assert.equal(first.ok, true);
+  env.fetcher.respond = () => ({ code: 200, body: JSON.stringify({ dispatchId: 'FF-7' }) });
+  assert.equal(rowObj(env, post(env, appPayload()).row).FastField_Task_ID, 'FF-7');
+});
+
+test('lock: if the stamp cannot get the lock the call still saves, and the id is logged and warned about', () => {
+  const env = configure(makeContext());
+  env.lock.deny = (ms) => ms === 5000;
+  const res = post(env, appPayload());
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.equal(rowObj(env, res.row).FastField_Task_ID, '');
+  assert.ok(res.warnings.some((w) => w.includes('FF-1001')));
+  assert.ok(env.logs.error.some((e) => e.includes('FF-1001')));
+  assert.equal(env.lock.held, false);
+});
+
+test('lock: the stamp never overwrites a task id that is already there', () => {
+  const env = configure(makeContext());
+  env.fetcher.respond = () => {
+    env.sheet.data[1][31] = 'EARLIER-ID';
+    return { code: 200, body: JSON.stringify({ dispatchId: 'FF-8' }) };
+  };
+  const res = post(env, appPayload());
+  assert.equal(rowObj(env, res.row).FastField_Task_ID, 'EARLIER-ID');
+});
+
+// --- testFastFieldDispatch ---------------------------------------------------
+
+test('testFastFieldDispatch: sends a marked test task with the live properties and logs the answer', () => {
+  const env = configure(makeContext());
+  env.fetcher.respond = () => ({ code: 201, body: JSON.stringify({ dispatchId: 'T-55' }), headers: { 'X-Req': 'abc' } });
+  const before = JSON.stringify(env.sheet.data);
+  const result = env.ctx.testFastFieldDispatch();
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), { dispatchId: 'T-55' });
+  const sent = JSON.parse(env.fetchCalls[0].options.payload);
+  assert.equal(sent.fields.alpha_1, 'TEST-DISPATCH-001');
+  assert.equal(sent.fields.alpha_3, 'Honda');
+  assert.equal(sent.fields.alpha_4, 'Civic');
+  assert.equal(sent.fields.numeric_1, 2022);
+  assert.equal(sent.fields.alpha_9, 'Roseville, CA');
+  assert.equal(sent.fields.alpha_13, 'Sacramento, CA');
+  assert.match(sent.fields.multiline_1, /TEST DISPATCH.*Quoted: \$150/);
+  assert.equal(env.fetchCalls[0].options.headers.Authorization, 'Bearer ff-key-123');
+  const log = env.logger.join('\n');
+  assert.match(log, /HTTP status: 201/);
+  assert.match(log, /X-Req/);
+  assert.match(log, /T-55/);
+  assert.ok(!log.includes('ff-key-123'), 'the key is never logged');
+  assert.equal(JSON.stringify(env.sheet.data), before, 'the Call Log is untouched');
+});
+
+test('testFastFieldDispatch: explains a rejection, a missing setting and a network failure', () => {
+  const env = configure(makeContext());
+  env.fetcher.respond = () => ({ code: 401, body: '{"error":"invalid key"}' });
+  const rejected = env.ctx.testFastFieldDispatch();
+  assert.deepEqual(JSON.parse(JSON.stringify(rejected)), { error: 'invalid key' });
+  assert.match(env.logger.join('\n'), /HTTP status: 401[\s\S]*FASTFIELD_API_KEY/);
+
+  const bare = makeContext();
+  assert.equal(bare.ctx.testFastFieldDispatch(), null);
+  assert.equal(bare.fetchCalls.length, 0);
+  assert.match(bare.logger.join('\n'), /Nothing was sent/);
+
+  const down = configure(makeContext());
+  down.fetcher.respond = () => new Error('DNS error');
+  assert.equal(down.ctx.testFastFieldDispatch(), null);
+  assert.match(down.logger.join('\n'), /DNS error/);
+
+  const html = configure(makeContext());
+  html.fetcher.respond = () => ({ code: 502, body: '<html>bad gateway</html>' });
+  html.ctx.testFastFieldDispatch();
+  assert.match(html.logger.join('\n'), /not JSON[\s\S]*bad gateway/);
+});
+
 // --- handleFastFieldWebhook_ -------------------------------------------------
 
 test('webhook: rejects a missing or wrong token', () => {
