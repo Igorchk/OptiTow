@@ -39,6 +39,16 @@ function appPayload(overrides = {}) {
   }, overrides);
 }
 
+/** Every request to FastField must carry the key in each header form the gateway may read. */
+function assertFastFieldHeaders(call, key = 'ff-key-123') {
+  const h = call.options.headers;
+  assert.equal(h['Ocp-Apim-Subscription-Key'], key);
+  assert.equal(h.Authorization, 'Bearer ' + key);
+  assert.equal(h['fastfield-api-key'], key);
+  assert.equal(h['Content-Type'], 'application/json');
+  assert.equal(h.Accept, 'application/json');
+}
+
 const hook = (body, query = {}) => ({ token: API_SECRET, ...body, ...query });
 const FF_QUERY = { source: 'fastfield', token: API_SECRET };
 
@@ -57,7 +67,7 @@ test('dispatch: a won call posts the right request and returns the task id', () 
   assert.equal(url, FF_URL);
   assert.equal(options.method, 'post');
   assert.equal(options.contentType, 'application/json');
-  assert.equal(options.headers.Authorization, 'Bearer ff-key-123');
+  assertFastFieldHeaders(env.fetchCalls[0]);
   assert.equal(options.muteHttpExceptions, true);
   const payload = JSON.parse(options.payload);
   assert.equal(payload.formId, 98765);
@@ -329,8 +339,9 @@ test('testFastFieldDispatch: verifies the key and form, then sends a marked test
   assert.equal(env.fetchCalls.length, 2);
   assert.equal(env.fetchCalls[0].url, FORMS_URL);
   assert.equal(env.fetchCalls[0].options.method, 'get');
-  assert.equal(env.fetchCalls[0].options.headers.Authorization, 'Bearer ff-key-123');
+  assertFastFieldHeaders(env.fetchCalls[0]);
   assert.equal(env.fetchCalls[1].url, FF_URL);
+  assertFastFieldHeaders(env.fetchCalls[1]);
   const sent = JSON.parse(env.fetchCalls[1].options.payload);
   assert.deepEqual(sent.users, ['driver@recoverytowing.example']);
   assert.equal(sent.autoCreateUsers, false);
@@ -376,7 +387,8 @@ test('testFastFieldDispatch: a rejected key stops at step 1 with a hint', () => 
   const env = configure(makeContext());
   fastFieldServer(env, { forms: { code: 401, body: '{"message":"Access denied"}' } });
   assert.equal(env.ctx.testFastFieldDispatch(), null);
-  assert.equal(env.fetchCalls.length, 1);
+  assert.equal(env.fetchCalls.length, 2, 'the forms request, then the 401 query-parameter check; never a dispatch');
+  assert.ok(env.fetchCalls.every((c) => c.url.startsWith(FORMS_URL)));
   assert.match(env.logger.join('\n'), /HTTP status: 401[\s\S]*FASTFIELD_API_KEY[\s\S]*Access denied/);
 });
 
@@ -414,6 +426,59 @@ test('testFastFieldDispatch: a missing setting and a network failure are explain
   fastFieldServer(html, { dispatch: { code: 502, body: '<html>bad gateway</html>' } });
   html.ctx.testFastFieldDispatch();
   assert.match(html.logger.join('\n'), /not JSON[\s\S]*bad gateway/);
+});
+
+test('headers: getFastFieldHeaders_ puts the key in all three places and asks for JSON', () => {
+  const env = makeContext();
+  assert.deepEqual(JSON.parse(JSON.stringify(env.ctx.getFastFieldHeaders_('K'))), {
+    'Ocp-Apim-Subscription-Key': 'K',
+    Authorization: 'Bearer K',
+    'fastfield-api-key': 'K',
+    'Content-Type': 'application/json',
+    Accept: 'application/json',
+  });
+});
+
+test('headers: every request FastField receives carries the subscription key, including real dispatches', () => {
+  const env = configure(makeContext());
+  post(env, appPayload());
+  fastFieldServer(env);
+  env.ctx.testFastFieldDispatch();
+  assert.ok(env.fetchCalls.length >= 3);
+  env.fetchCalls.forEach((call) => assertFastFieldHeaders(call));
+});
+
+test('testFastFieldDispatch: a 401 on the forms list also tries ?subscription-key= and reports an accepting gateway', () => {
+  const env = configure(makeContext());
+  env.fetcher.respond = (url) => (url.includes('subscription-key=ff-key-123')
+    ? { code: 200, body: JSON.stringify(FORMS) }
+    : { code: 401, body: JSON.stringify({ statusCode: 401, message: 'Access denied due to missing subscription key.' }) });
+  assert.equal(env.ctx.testFastFieldDispatch(), null);
+  assert.equal(env.fetchCalls.length, 2, 'no task is dispatched');
+  assert.equal(env.fetchCalls[1].url, FORMS_URL + '?subscription-key=ff-key-123');
+  assert.equal(env.fetchCalls[1].options.headers.Authorization, undefined, 'the probe sends the key only in the URL');
+  const log = env.logger.join('\n');
+  assert.match(log, /HTTP status: 401[\s\S]*missing subscription key/);
+  assert.match(log, /ACCEPTS the key as \?subscription-key=/);
+  assert.ok(!log.includes('ff-key-123'), 'neither the key nor the URL holding it is logged');
+});
+
+test('testFastFieldDispatch: when the query parameter is refused too, it says the key itself is suspect', () => {
+  const env = configure(makeContext());
+  env.fetcher.respond = () => ({ code: 401, body: JSON.stringify({ message: 'Access denied due to invalid subscription key.' }) });
+  assert.equal(env.ctx.testFastFieldDispatch(), null);
+  assert.equal(env.fetchCalls.length, 2);
+  const log = env.logger.join('\n');
+  assert.match(log, /does not accept the key as \?subscription-key= either/);
+  assert.match(log, /key itself is probably not a valid subscription key/);
+  assert.ok(!log.includes('ff-key-123'));
+});
+
+test('testFastFieldDispatch: a non-401 failure does not run the query-parameter check', () => {
+  const env = configure(makeContext());
+  fastFieldServer(env, { forms: { code: 404, body: '{"message":"Resource not found"}' } });
+  env.ctx.testFastFieldDispatch();
+  assert.equal(env.fetchCalls.length, 1);
 });
 
 // --- handleFastFieldWebhook_ -------------------------------------------------

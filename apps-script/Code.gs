@@ -1043,6 +1043,21 @@ function fastFieldConfig_() {
 }
 
 /**
+ * Every header FastField's gateway (Azure API Management) may look for a key in. The gateway
+ * answered a Bearer-only request with "missing subscription key", so the key goes in all three
+ * places it is known to be read from; the extra headers are harmless where unused.
+ */
+function getFastFieldHeaders_(apiKey) {
+  return {
+    'Ocp-Apim-Subscription-Key': apiKey,
+    'Authorization': 'Bearer ' + apiKey,
+    'fastfield-api-key': apiKey,
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+  };
+}
+
+/**
  * Sends a won call to FastField as a pre-filled task and reports everything about the answer:
  * { code, headers, text, parsed, id, error }. Returns null, after logging why, when nothing was
  * sent (not won, or FastField not configured). Shared by dispatchToFastField_ and the manual
@@ -1084,7 +1099,7 @@ function sendFastFieldDispatch_(callData) {
     const response = UrlFetchApp.fetch(CONFIG.FASTFIELD_DISPATCH_URL, {
       method: 'post',
       contentType: 'application/json',
-      headers: { Authorization: 'Bearer ' + config.FASTFIELD_API_KEY },
+      headers: getFastFieldHeaders_(config.FASTFIELD_API_KEY),
       payload: JSON.stringify(payload),
       muteHttpExceptions: true,
     });
@@ -1123,13 +1138,13 @@ function dispatchToFastField_(callData) {
   return result.id;
 }
 
-/** A GET to FastField with the Bearer key: { code, headers, text, parsed, error }. */
-function fastFieldGet_(url, apiKey) {
+/** A GET to FastField: { code, headers, text, parsed, error }. `headers` are the request headers. */
+function fastFieldGet_(url, headers) {
   const result = { code: 0, headers: {}, text: '', parsed: null, error: '' };
   try {
     const response = UrlFetchApp.fetch(url, {
       method: 'get',
-      headers: { Authorization: 'Bearer ' + apiKey },
+      headers: headers,
       muteHttpExceptions: true,
     });
     result.code = response.getResponseCode();
@@ -1177,9 +1192,28 @@ function describeFastFieldError_(result) {
 }
 
 /**
+ * Diagnostic for a 401: tries the key as a `subscription-key` query parameter, with none of the
+ * header forms, and logs whether the gateway takes it. The URL (which holds the key) is never logged.
+ */
+function probeQuerySubscriptionKey_(apiKey) {
+  const url = CONFIG.FASTFIELD_FORMS_URL + (CONFIG.FASTFIELD_FORMS_URL.indexOf('?') === -1 ? '?' : '&') +
+    'subscription-key=' + encodeURIComponent(apiKey);
+  const probe = fastFieldGet_(url, { Accept: 'application/json' });
+  if (probe.error) {
+    Logger.log('Query-parameter check failed before FastField answered: ' + probe.error);
+  } else if (probe.code === 200) {
+    Logger.log('Query-parameter check: HTTP 200. The gateway ACCEPTS the key as ?subscription-key=, but not in the headers sent above. The header name this gateway reads is not one of the ones tried; tell me and the code can send the key as a query parameter.');
+  } else {
+    Logger.log('Query-parameter check: HTTP ' + probe.code + '. The gateway does not accept the key as ?subscription-key= either. Reply: ' + describeFastFieldError_(probe));
+    Logger.log('The key itself is probably not a valid subscription key for this API, or it is for a different product. Check FASTFIELD_API_KEY with FastField (the key from their developer portal / API access page).');
+  }
+}
+
+/**
  * Manual diagnostic: run it from the Apps Script editor to check FastField with the live Script
  * Properties, in two steps.
- *   1. Authentication and form: GET the forms list with the API key and look for FASTFIELD_FORM_ID.
+ *   1. Authentication and form: GET the forms list with the API key (sent in every header form the
+ *      gateway may read) and look for FASTFIELD_FORM_ID. A 401 also tries the key as a query parameter.
  *   2. Dispatch: send one clearly marked TEST task and log the status, headers and reply (with
  *      FastField's own message for a 400 or 422).
  * It never touches the Call Log. The task is real, though: it appears on the driver's FastField
@@ -1193,7 +1227,7 @@ function testFastFieldDispatch() {
   }
 
   Logger.log('Step 1 of 2: checking the API key and form id (GET ' + CONFIG.FASTFIELD_FORMS_URL + ')');
-  const forms = fastFieldGet_(CONFIG.FASTFIELD_FORMS_URL, config.FASTFIELD_API_KEY);
+  const forms = fastFieldGet_(CONFIG.FASTFIELD_FORMS_URL, getFastFieldHeaders_(config.FASTFIELD_API_KEY));
   if (forms.error) {
     Logger.log('Request failed before FastField answered: ' + forms.error);
     return null;
@@ -1203,6 +1237,7 @@ function testFastFieldDispatch() {
     if (forms.code === 401 || forms.code === 403) Logger.log('Rejected: the API key was not accepted. Check FASTFIELD_API_KEY.');
     else if (forms.code === 404) Logger.log('Not found: check CONFIG.FASTFIELD_FORMS_URL.');
     Logger.log('Reply: ' + describeFastFieldError_(forms));
+    if (forms.code === 401) probeQuerySubscriptionKey_(config.FASTFIELD_API_KEY);
     Logger.log('Stopped: fix step 1 before a task is sent.');
     return null;
   }
