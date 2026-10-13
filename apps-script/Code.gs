@@ -47,8 +47,9 @@ const CONFIG = Object.freeze({
   ROW_GROWTH: 500,
   // How long a customer's shared location stays readable (and how long a link stays valid).
   LOCATION_TTL_SECONDS: 15 * 60,
-  // The one place the FastField dispatch address lives, in case the account uses another API version.
-  FASTFIELD_DISPATCH_URL: 'https://api.fastfieldforms.com/services/v1/dispatches',
+  // FastField's v3 API. The one place these addresses live. (v1 does not exist; the gateway answers 404.)
+  FASTFIELD_DISPATCH_URL: 'https://api.fastfieldforms.com/services/v3/dispatches',
+  FASTFIELD_FORMS_URL: 'https://api.fastfieldforms.com/services/v3/forms',
   FASTFIELD_LOCK_WAIT_MS: 30000,
   // Phase 3 of a dispatch only stamps one cell, so it waits briefly.
   FASTFIELD_STAMP_LOCK_WAIT_MS: 5000,
@@ -1063,8 +1064,9 @@ function sendFastFieldDispatch_(callData) {
   const text = function (v) { return v === undefined || v === null ? '' : v; };
   const payload = {
     formId: formId,
-    assignedUserId: config.FASTFIELD_USER_ID,
-    fields: {
+    users: [config.FASTFIELD_USER_ID],
+    autoCreateUsers: false,
+    mergeFields: {
       alpha_1: callData.call_id,
       multiline_1: [notes, quote].filter(Boolean).join(' | '),
       formattedinput_1: text(callData.customer_phone),
@@ -1090,7 +1092,7 @@ function sendFastFieldDispatch_(callData) {
     result.text = String(response.getContentText());
     if (typeof response.getAllHeaders === 'function') result.headers = response.getAllHeaders();
     try { result.parsed = JSON.parse(result.text); } catch (_) { result.parsed = null; }
-    const found = result.parsed && (result.parsed.dispatchId || result.parsed.taskId);
+    const found = result.parsed && (result.parsed.dispatchId || result.parsed.taskId || result.parsed.id);
     if (found) result.id = String(found);
   } catch (err) {
     result.error = String(err && err.message ? err.message : err);
@@ -1115,20 +1117,114 @@ function dispatchToFastField_(callData) {
     return null;
   }
   if (!result.id) {
-    console.error('FastField dispatch answered HTTP ' + result.code + ' without a dispatchId or taskId: ' + result.text.slice(0, 500));
+    console.error('FastField dispatch answered HTTP ' + result.code + ' without a dispatchId, taskId or id: ' + result.text.slice(0, 500));
     return null;
   }
   return result.id;
 }
 
+/** A GET to FastField with the Bearer key: { code, headers, text, parsed, error }. */
+function fastFieldGet_(url, apiKey) {
+  const result = { code: 0, headers: {}, text: '', parsed: null, error: '' };
+  try {
+    const response = UrlFetchApp.fetch(url, {
+      method: 'get',
+      headers: { Authorization: 'Bearer ' + apiKey },
+      muteHttpExceptions: true,
+    });
+    result.code = response.getResponseCode();
+    result.text = String(response.getContentText());
+    if (typeof response.getAllHeaders === 'function') result.headers = response.getAllHeaders();
+    try { result.parsed = JSON.parse(result.text); } catch (_) { result.parsed = null; }
+  } catch (err) {
+    result.error = String(err && err.message ? err.message : err);
+  }
+  return result;
+}
+
+/** The forms in a /forms reply, whether it is a bare array or wrapped in forms / data / items / results. */
+function fastFieldFormList_(parsed) {
+  if (Array.isArray(parsed)) return parsed;
+  if (!parsed || typeof parsed !== 'object') return null;
+  const keys = ['forms', 'data', 'items', 'results'];
+  for (let i = 0; i < keys.length; i++) {
+    if (Array.isArray(parsed[keys[i]])) return parsed[keys[i]];
+  }
+  return null;
+}
+
+function fastFieldFormId_(form) {
+  const id = form && (form.id !== undefined ? form.id : (form.formId !== undefined ? form.formId : form.form_id));
+  return id === undefined || id === null ? '' : String(id);
+}
+
+function fastFieldFormName_(form) {
+  return String((form && (form.name || form.formName || form.title)) || '(no name)');
+}
+
+/** FastField's own explanation of a rejected request, from message / error / errors in the reply. */
+function describeFastFieldError_(result) {
+  const parsed = result.parsed;
+  const parts = [];
+  if (parsed && typeof parsed === 'object') {
+    ['message', 'error', 'errors', 'detail', 'title'].forEach(function (key) {
+      const v = parsed[key];
+      if (v === undefined || v === null || v === '') return;
+      parts.push(key + ': ' + (typeof v === 'string' ? v : JSON.stringify(v)));
+    });
+  }
+  return parts.length ? parts.join(' | ') : result.text.slice(0, 1000);
+}
+
 /**
- * Manual diagnostic: run it from the Apps Script editor to check the FastField credentials and the
- * dispatch address with the live Script Properties. It sends a clearly marked TEST task and logs the
- * HTTP status, the response headers and the parsed reply. It does not touch the Call Log. The task
- * is real, though: it appears on the driver's FastField list, so delete it there afterwards.
+ * Manual diagnostic: run it from the Apps Script editor to check FastField with the live Script
+ * Properties, in two steps.
+ *   1. Authentication and form: GET the forms list with the API key and look for FASTFIELD_FORM_ID.
+ *   2. Dispatch: send one clearly marked TEST task and log the status, headers and reply (with
+ *      FastField's own message for a 400 or 422).
+ * It never touches the Call Log. The task is real, though: it appears on the driver's FastField
+ * list, so delete it there afterwards. Returns the parsed dispatch reply, or null if it stopped.
  */
 function testFastFieldDispatch() {
-  const callData = {
+  const config = fastFieldConfig_();
+  if (!config) {
+    Logger.log('Nothing was sent. FASTFIELD_API_KEY, FASTFIELD_FORM_ID and FASTFIELD_USER_ID must all be set in Script Properties.');
+    return null;
+  }
+
+  Logger.log('Step 1 of 2: checking the API key and form id (GET ' + CONFIG.FASTFIELD_FORMS_URL + ')');
+  const forms = fastFieldGet_(CONFIG.FASTFIELD_FORMS_URL, config.FASTFIELD_API_KEY);
+  if (forms.error) {
+    Logger.log('Request failed before FastField answered: ' + forms.error);
+    return null;
+  }
+  Logger.log('HTTP status: ' + forms.code);
+  if (forms.code !== 200) {
+    if (forms.code === 401 || forms.code === 403) Logger.log('Rejected: the API key was not accepted. Check FASTFIELD_API_KEY.');
+    else if (forms.code === 404) Logger.log('Not found: check CONFIG.FASTFIELD_FORMS_URL.');
+    Logger.log('Reply: ' + describeFastFieldError_(forms));
+    Logger.log('Stopped: fix step 1 before a task is sent.');
+    return null;
+  }
+  const list = fastFieldFormList_(forms.parsed);
+  if (!list) {
+    Logger.log('The forms reply was not a list I recognize, so the form id could not be checked. Reply: ' + forms.text.slice(0, 500));
+    Logger.log('Continuing to step 2 without verifying the form.');
+  } else {
+    const wanted = String(config.FASTFIELD_FORM_ID);
+    const match = list.filter(function (f) { return fastFieldFormId_(f) === wanted; })[0];
+    if (match) {
+      Logger.log('Form verified: ' + fastFieldFormName_(match));
+    } else {
+      Logger.log('FASTFIELD_FORM_ID "' + wanted + '" is not among the ' + list.length + ' form(s) this key can see. Available forms:');
+      list.forEach(function (f) { Logger.log('  ' + fastFieldFormId_(f) + '  ' + fastFieldFormName_(f)); });
+      Logger.log('Stopped: correct FASTFIELD_FORM_ID in Script Properties (or the key belongs to a different account).');
+      return null;
+    }
+  }
+
+  Logger.log('Step 2 of 2: sending a TEST task (it will show up on the driver\'s list; delete it afterwards).');
+  const result = sendFastFieldDispatch_({
     call_id: 'TEST-DISPATCH-001',
     outcome: OUTCOME_WON,
     customer_phone: '916-555-0100',
@@ -1140,11 +1236,9 @@ function testFastFieldDispatch() {
     dropoff_address: 'Sacramento, CA',
     quoted_price: 150,
     notes_comments: 'TEST DISPATCH, safe to delete',
-  };
-  Logger.log('Sending a TEST task to FastField (it will show up on the driver\'s list; delete it afterwards).');
-  const result = sendFastFieldDispatch_(callData);
+  });
   if (!result) {
-    Logger.log('Nothing was sent. Check the log above: FASTFIELD_API_KEY, FASTFIELD_FORM_ID and FASTFIELD_USER_ID must all be set in Script Properties.');
+    Logger.log('Nothing was sent (see above).');
     return null;
   }
   if (result.error) {
@@ -1158,11 +1252,13 @@ function testFastFieldDispatch() {
   if (result.code === 200 || result.code === 201) {
     Logger.log(result.id
       ? 'OK. FastField created task ' + result.id + '.'
-      : 'FastField answered OK but the reply has no dispatchId or taskId; check the reply above.');
+      : 'FastField answered OK but the reply has no dispatchId, taskId or id; check the reply above.');
+  } else if (result.code === 400 || result.code === 422) {
+    Logger.log('FastField rejected the request as invalid. Its message: ' + describeFastFieldError_(result));
   } else if (result.code === 401 || result.code === 403) {
-    Logger.log('Rejected: the API key was not accepted. Check FASTFIELD_API_KEY.');
+    Logger.log('Rejected: the API key was not accepted for dispatching. Check FASTFIELD_API_KEY and its permissions.');
   } else if (result.code === 404) {
-    Logger.log('Not found: check the dispatch address (CONFIG.FASTFIELD_DISPATCH_URL) and FASTFIELD_FORM_ID.');
+    Logger.log('Not found: check CONFIG.FASTFIELD_DISPATCH_URL.');
   } else {
     Logger.log('Rejected: see the reply above for FastField\'s reason.');
   }

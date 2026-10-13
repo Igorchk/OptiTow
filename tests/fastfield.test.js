@@ -8,7 +8,8 @@ const { API_SECRET, makeContext, post, rowObj, dataRowCount } = require('./suppo
 
 const WON = '1 - Won / Booked';
 const LOST = '0 - Lost / Declined';
-const FF_URL = 'https://api.fastfieldforms.com/services/v1/dispatches';
+const FF_URL = 'https://api.fastfieldforms.com/services/v3/dispatches';
+const FORMS_URL = 'https://api.fastfieldforms.com/services/v3/forms';
 const PDF = 'https://reports.fastfieldforms.com/receipts/abc123.pdf';
 
 function configure(env) {
@@ -61,10 +62,14 @@ test('dispatch: a won call posts the right request and returns the task id', () 
   const payload = JSON.parse(options.payload);
   assert.equal(payload.formId, 98765);
   assert.equal(typeof payload.formId, 'number');
-  assert.equal(payload.assignedUserId, 'driver@recoverytowing.example');
-  assert.deepEqual(Object.keys(payload.fields).sort(),
+  assert.deepEqual(payload.users, ['driver@recoverytowing.example']);
+  assert.equal(payload.autoCreateUsers, false);
+  assert.equal(payload.assignedUserId, undefined, 'v1 field is gone');
+  assert.equal(payload.fields, undefined, 'v1 field is gone');
+  assert.deepEqual(Object.keys(payload).sort(), ['autoCreateUsers', 'formId', 'mergeFields', 'users']);
+  assert.deepEqual(Object.keys(payload.mergeFields).sort(),
     ['alpha_1', 'alpha_13', 'alpha_3', 'alpha_4', 'alpha_9', 'formattedinput_1', 'listpicker_2', 'multiline_1', 'numeric_1']);
-  assert.deepEqual(payload.fields, {
+  assert.deepEqual(payload.mergeFields, {
     alpha_1: 'JOB-0001', multiline_1: 'No keys | Quoted: $285', formattedinput_1: '916-555-0199', numeric_1: 2021,
     alpha_3: 'Tesla', alpha_4: 'Model 3', alpha_9: 'A', alpha_13: 'B', listpicker_2: 'Standard Tow',
   });
@@ -73,7 +78,7 @@ test('dispatch: a won call posts the right request and returns the task id', () 
 test('dispatch: the outcome text, a missing year and a missing note all behave', () => {
   const env = configure(makeContext());
   env.ctx.dispatchToFastField_({ call_id: 'J', outcome: WON, quoted_price: 100 });
-  const fields = JSON.parse(env.fetchCalls[0].options.payload).fields;
+  const fields = JSON.parse(env.fetchCalls[0].options.payload).mergeFields;
   assert.equal(fields.numeric_1, null);
   assert.equal(fields.multiline_1, 'Quoted: $100', 'no stray separator when there are no notes');
   assert.equal(fields.alpha_3, '');
@@ -107,10 +112,14 @@ test('dispatch: a non-numeric form id is skipped, not sent', () => {
   assert.equal(env.fetchCalls.length, 0);
 });
 
-test('dispatch: accepts 201 and either dispatchId or taskId', () => {
+test('dispatch: accepts 200 or 201 and a dispatchId, taskId or id in the reply', () => {
   const env = configure(makeContext());
   env.fetcher.respond = () => ({ code: 201, body: JSON.stringify({ taskId: 'T-7' }) });
   assert.equal(env.ctx.dispatchToFastField_({ call_id: 'J', outcome: 1 }), 'T-7');
+  env.fetcher.respond = () => ({ code: 200, body: JSON.stringify({ id: 4242 }) });
+  assert.equal(env.ctx.dispatchToFastField_({ call_id: 'J', outcome: 1 }), '4242');
+  env.fetcher.respond = () => ({ code: 200, body: JSON.stringify({ dispatchId: 'D-1', id: 'ignored' }) });
+  assert.equal(env.ctx.dispatchToFastField_({ call_id: 'J', outcome: 1 }), 'D-1');
 });
 
 test('dispatch: HTTP errors, bad bodies and thrown fetches return null and log', () => {
@@ -301,36 +310,96 @@ test('lock: the stamp never overwrites a task id that is already there', () => {
 
 // --- testFastFieldDispatch ---------------------------------------------------
 
-test('testFastFieldDispatch: sends a marked test task with the live properties and logs the answer', () => {
+const FORMS = [{ id: 11111, name: 'Inspection' }, { id: 98765, name: 'Recovery Towing Service Form' }];
+
+/** Answers the forms list and the dispatch like FastField would. */
+function fastFieldServer(env, { forms = { code: 200, body: JSON.stringify(FORMS) }, dispatch } = {}) {
+  env.fetcher.respond = (url) => (url === FORMS_URL
+    ? forms
+    : (dispatch || { code: 201, body: JSON.stringify({ dispatchId: 'T-55' }), headers: { 'X-Req': 'abc' } }));
+}
+
+test('testFastFieldDispatch: verifies the key and form, then sends a marked test task and logs the answer', () => {
   const env = configure(makeContext());
-  env.fetcher.respond = () => ({ code: 201, body: JSON.stringify({ dispatchId: 'T-55' }), headers: { 'X-Req': 'abc' } });
+  fastFieldServer(env);
   const before = JSON.stringify(env.sheet.data);
   const result = env.ctx.testFastFieldDispatch();
   assert.deepEqual(JSON.parse(JSON.stringify(result)), { dispatchId: 'T-55' });
-  const sent = JSON.parse(env.fetchCalls[0].options.payload);
-  assert.equal(sent.fields.alpha_1, 'TEST-DISPATCH-001');
-  assert.equal(sent.fields.alpha_3, 'Honda');
-  assert.equal(sent.fields.alpha_4, 'Civic');
-  assert.equal(sent.fields.numeric_1, 2022);
-  assert.equal(sent.fields.alpha_9, 'Roseville, CA');
-  assert.equal(sent.fields.alpha_13, 'Sacramento, CA');
-  assert.match(sent.fields.multiline_1, /TEST DISPATCH.*Quoted: \$150/);
+
+  assert.equal(env.fetchCalls.length, 2);
+  assert.equal(env.fetchCalls[0].url, FORMS_URL);
+  assert.equal(env.fetchCalls[0].options.method, 'get');
   assert.equal(env.fetchCalls[0].options.headers.Authorization, 'Bearer ff-key-123');
+  assert.equal(env.fetchCalls[1].url, FF_URL);
+  const sent = JSON.parse(env.fetchCalls[1].options.payload);
+  assert.deepEqual(sent.users, ['driver@recoverytowing.example']);
+  assert.equal(sent.autoCreateUsers, false);
+  assert.equal(sent.mergeFields.alpha_1, 'TEST-DISPATCH-001');
+  assert.equal(sent.mergeFields.alpha_3, 'Honda');
+  assert.equal(sent.mergeFields.alpha_4, 'Civic');
+  assert.equal(sent.mergeFields.numeric_1, 2022);
+  assert.equal(sent.mergeFields.alpha_9, 'Roseville, CA');
+  assert.equal(sent.mergeFields.alpha_13, 'Sacramento, CA');
+  assert.match(sent.mergeFields.multiline_1, /TEST DISPATCH.*Quoted: \$150/);
+
   const log = env.logger.join('\n');
-  assert.match(log, /HTTP status: 201/);
+  assert.match(log, /HTTP status: 200[\s\S]*Form verified: Recovery Towing Service Form[\s\S]*HTTP status: 201/);
   assert.match(log, /X-Req/);
   assert.match(log, /T-55/);
   assert.ok(!log.includes('ff-key-123'), 'the key is never logged');
   assert.equal(JSON.stringify(env.sheet.data), before, 'the Call Log is untouched');
 });
 
-test('testFastFieldDispatch: explains a rejection, a missing setting and a network failure', () => {
-  const env = configure(makeContext());
-  env.fetcher.respond = () => ({ code: 401, body: '{"error":"invalid key"}' });
-  const rejected = env.ctx.testFastFieldDispatch();
-  assert.deepEqual(JSON.parse(JSON.stringify(rejected)), { error: 'invalid key' });
-  assert.match(env.logger.join('\n'), /HTTP status: 401[\s\S]*FASTFIELD_API_KEY/);
+test('testFastFieldDispatch: reads the forms list whether bare or wrapped, and ids as numbers or text', () => {
+  for (const body of [FORMS, { forms: FORMS }, { data: FORMS.map((f) => ({ formId: String(f.id), formName: f.name })) }]) {
+    const env = configure(makeContext());
+    fastFieldServer(env, { forms: { code: 200, body: JSON.stringify(body) } });
+    env.ctx.testFastFieldDispatch();
+    assert.match(env.logger.join('\n'), /Form verified: Recovery Towing Service Form/);
+    assert.equal(env.fetchCalls.length, 2);
+  }
+});
 
+test('testFastFieldDispatch: a form id that is not in the list shows the available forms and sends nothing', () => {
+  const env = configure(makeContext());
+  env.props.FASTFIELD_FORM_ID = '98766';
+  fastFieldServer(env);
+  assert.equal(env.ctx.testFastFieldDispatch(), null);
+  assert.equal(env.fetchCalls.length, 1, 'no task was dispatched');
+  const log = env.logger.join('\n');
+  assert.match(log, /"98766" is not among the 2 form/);
+  assert.match(log, /11111\s+Inspection/);
+  assert.match(log, /98765\s+Recovery Towing Service Form/);
+});
+
+test('testFastFieldDispatch: a rejected key stops at step 1 with a hint', () => {
+  const env = configure(makeContext());
+  fastFieldServer(env, { forms: { code: 401, body: '{"message":"Access denied"}' } });
+  assert.equal(env.ctx.testFastFieldDispatch(), null);
+  assert.equal(env.fetchCalls.length, 1);
+  assert.match(env.logger.join('\n'), /HTTP status: 401[\s\S]*FASTFIELD_API_KEY[\s\S]*Access denied/);
+});
+
+test('testFastFieldDispatch: an unreadable forms reply continues to the dispatch with a note', () => {
+  const env = configure(makeContext());
+  fastFieldServer(env, { forms: { code: 200, body: '<html>ok</html>' } });
+  env.ctx.testFastFieldDispatch();
+  assert.equal(env.fetchCalls.length, 2);
+  assert.match(env.logger.join('\n'), /could not be checked/);
+});
+
+test('testFastFieldDispatch: a 400 or 422 on the dispatch logs FastField\'s exact validation message', () => {
+  for (const code of [400, 422]) {
+    const env = configure(makeContext());
+    fastFieldServer(env, { dispatch: { code, body: JSON.stringify({ message: 'Validation failed', errors: [{ field: 'users', error: 'unknown user' }] }) } });
+    env.ctx.testFastFieldDispatch();
+    const log = env.logger.join('\n');
+    assert.match(log, new RegExp('HTTP status: ' + code));
+    assert.match(log, /rejected the request as invalid[\s\S]*message: Validation failed[\s\S]*unknown user/);
+  }
+});
+
+test('testFastFieldDispatch: a missing setting and a network failure are explained', () => {
   const bare = makeContext();
   assert.equal(bare.ctx.testFastFieldDispatch(), null);
   assert.equal(bare.fetchCalls.length, 0);
@@ -342,7 +411,7 @@ test('testFastFieldDispatch: explains a rejection, a missing setting and a netwo
   assert.match(down.logger.join('\n'), /DNS error/);
 
   const html = configure(makeContext());
-  html.fetcher.respond = () => ({ code: 502, body: '<html>bad gateway</html>' });
+  fastFieldServer(html, { dispatch: { code: 502, body: '<html>bad gateway</html>' } });
   html.ctx.testFastFieldDispatch();
   assert.match(html.logger.join('\n'), /not JSON[\s\S]*bad gateway/);
 });
