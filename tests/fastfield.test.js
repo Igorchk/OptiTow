@@ -95,7 +95,8 @@ test('dispatch: a won call posts the right request and returns the task id', () 
   assert.equal(payload.autoCreateUsers, false);
   assert.equal(payload.assignedUserId, undefined, 'v1 field is gone');
   assert.equal(payload.fields, undefined, 'v1 field is gone');
-  assert.deepEqual(Object.keys(payload).sort(), ['autoCreateUsers', 'formId', 'mergeFields', 'users']);
+  assert.equal(payload.name, 'Tow - 2021 Tesla Model 3 - JOB-0001', 'FastField requires a name for the task');
+  assert.deepEqual(Object.keys(payload).sort(), ['autoCreateUsers', 'formId', 'mergeFields', 'name', 'users']);
   assert.deepEqual(Object.keys(payload.mergeFields).sort(),
     ['alpha_1', 'alpha_13', 'alpha_3', 'alpha_4', 'alpha_9', 'formattedinput_1', 'listpicker_2', 'multiline_1', 'numeric_1']);
   assert.deepEqual(payload.mergeFields, {
@@ -1392,10 +1393,10 @@ test('recipient matrix: every candidate shape is tried in order, with the same m
   fastFieldServer(env, { dispatch: NO_RECIPIENT });
   env.ctx.testFastFieldDispatch();
   const all = bodies(env);
-  assert.equal(all.length, 23, 'the first send plus 22 other ways');
+  assert.equal(all.length, 28, 'the first send plus 27 other ways');
   const shape = (b) => {
     const copy = JSON.parse(JSON.stringify(b));
-    delete copy.mergeFields; delete copy.MergeFields; delete copy.autoCreateUsers;
+    delete copy.mergeFields; delete copy.MergeFields; delete copy.autoCreateUsers; delete copy.name;
     return copy;
   };
   const E = 'driver@recoverytowing.example';
@@ -1418,6 +1419,11 @@ test('recipient matrix: every candidate shape is tried in order, with the same m
     { formId: 98765, recipients: [{ email: E, isAnonymousDispatch: false }] },
     { FormId: 98765, Users: [5002] },
     { FormId: 98765, AssignedUserId: 5002 },
+    { formId: 98765, recipients: [{ userId: 5002 }] },
+    { formId: 98765, recipients: [{ email: E }] },
+    { formId: 98765, dispatchName: 'Tow - 2022 Honda Civic - TEST-DISPATCH-001', recipients: [{ userId: 5002 }] },
+    { formId: 98765, title: 'Tow - 2022 Honda Civic - TEST-DISPATCH-001', recipients: [{ userId: 5002 }] },
+    { formId: 98765, Name: 'Tow - 2022 Honda Civic - TEST-DISPATCH-001', recipients: [{ userId: 5002 }] },
   ]);
   all.slice(5).forEach((b) => assert.equal((b.mergeFields || b.MergeFields).alpha_1, 'TEST-DISPATCH-001'));
   all.forEach((b, i) => assertSessionHeaders(dispatches(env)[i]));
@@ -1439,7 +1445,7 @@ test('recipient matrix: stops at the first HTTP 200/201 and logs the winning pay
   assert.equal(bodies(env).length, 11, 'it stopped at recipients: [user id]');
   const log = logText(env);
   assert.match(log, /ACCEPTED with recipients: \[user id\] \(task T-99 created/);
-  assert.match(log, /Winning payload schema: \{"formId":98765,"mergeFields":"<mergeFields>","recipients":\[5002\]\}/);
+  assert.match(log, /Winning payload schema: \{"formId":98765,"name":"Tow - 2022 Honda Civic - TEST-DISPATCH-001","mergeFields":"<mergeFields>","recipients":\[5002\]\}/);
   assert.match(log, /not one dispatches send yet/);
 });
 
@@ -1453,7 +1459,7 @@ test('recipient matrix: the winning schema never shows the email', () => {
     return JSON.parse(options.payload).assignedTo ? { code: 200, body: '{"id":"T-7"}' } : NO_RECIPIENT;
   };
   env.ctx.testFastFieldDispatch();
-  assert.match(logText(env), /Winning payload schema: \{"formId":98765,"mergeFields":"<mergeFields>","assignedTo":"<email>"\}/);
+  assert.match(logText(env), /Winning payload schema: \{"formId":98765,"name":"Tow - 2022 Honda Civic - TEST-DISPATCH-001","mergeFields":"<mergeFields>","assignedTo":"<email>"\}/);
 });
 
 test('step 3: the usergroups are listed with the session headers, and a failure does not stop the test', () => {
@@ -1517,7 +1523,7 @@ test('recipient matrix: a 429 is waited out and retried, never taken for an acce
   assert.deepEqual([...env.sleeps], [36000, 36000]);
   assert.ok(!/ACCEPTED|different answer/.test(logText(env)));
   assert.match(logText(env), /rate limited \(HTTP 429\); waiting 36 s/);
-  assert.equal(dispatches(env).length, 25, '23 shapes, plus the 2 repeated');
+  assert.equal(dispatches(env).length, 30, '28 shapes, plus the 2 repeated');
 
   const stuck = configure(makeContext());
   stuck.fetcher.respond = (url) => (url === FORMS_URL ? { code: 200, body: JSON.stringify(FORMS) }

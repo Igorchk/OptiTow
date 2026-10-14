@@ -1199,13 +1199,20 @@ function clearFastFieldSessionToken_() {
 }
 
 // How a recipient may be named in a dispatch body.
-const FASTFIELD_RECIPIENT_FIELDS = Object.freeze(['users', 'userIds', 'userEmail']);
+const FASTFIELD_RECIPIENT_FIELDS = Object.freeze(['users', 'userIds', 'userEmail', 'recipients']);
 
 /** Who a dispatch goes to: { field, value }, from the optional RECIPIENT properties, else the login email. */
 function fastFieldRecipient_(config) {
   const field = FASTFIELD_RECIPIENT_FIELDS.indexOf(config.FASTFIELD_RECIPIENT_FIELD) !== -1
     ? config.FASTFIELD_RECIPIENT_FIELD : 'users';
   return { field: field, value: config.FASTFIELD_RECIPIENT_ID || config.FASTFIELD_USER_ID };
+}
+
+/** The task's title, which FastField requires ("Cannot insert NULL into column Name" without it). */
+function fastFieldDispatchName_(callData) {
+  const car = [callData.vehicle_year, callData.vehicle_make, callData.vehicle_model]
+    .filter(function (v) { return v !== undefined && v !== null && String(v).trim() !== ''; }).join(' ');
+  return ['Tow', car, callData.call_id].filter(Boolean).join(' - ');
 }
 
 /** The dispatch body: the form, who it goes to (`recipient`: { field, value }), and the merge fields that pre-fill the job. */
@@ -1216,6 +1223,7 @@ function buildFastFieldPayload_(callData, formId, recipient) {
   const text = function (v) { return v === undefined || v === null ? '' : v; };
   const payload = {
     formId: formId,
+    name: fastFieldDispatchName_(callData),
     autoCreateUsers: false,
     mergeFields: {
       alpha_1: callData.call_id,
@@ -1229,8 +1237,13 @@ function buildFastFieldPayload_(callData, formId, recipient) {
       listpicker_2: text(callData.service_requested),
     },
   };
-  // `users` and `userIds` take a list; `userEmail` a single address.
-  payload[recipient.field] = recipient.field === 'userEmail' ? recipient.value : [recipient.value];
+  // `users` and `userIds` take a list; `userEmail` a single address; `recipients` a list of objects,
+  // each naming the user by id when the value is a number, else by email.
+  if (recipient.field === 'recipients') {
+    payload.recipients = [/^\d+$/.test(String(recipient.value)) ? { userId: Number(recipient.value) } : { email: recipient.value }];
+  } else {
+    payload[recipient.field] = recipient.field === 'userEmail' ? recipient.value : [recipient.value];
+  }
   return payload;
 }
 
@@ -1766,8 +1779,9 @@ function tryFastFieldRecipientFormats_(config, sessionToken, testCall, found) {
   // A candidate: a label (the email shown as <email>), the whole body, and, for the three shapes the
   // code can send, the recipient settings that would select it.
   const add = function (label, payload, recipient) { candidates.push({ label: label, payload: payload, recipient: recipient }); };
+  const name = buildFastFieldPayload_(testCall, formId, first).name;
   const base = function (extra) {
-    const body = { formId: formId, mergeFields: fields };
+    const body = { formId: formId, name: name, mergeFields: fields };
     Object.keys(extra).forEach(function (k) { body[k] = extra[k]; });
     return body;
   };
@@ -1811,6 +1825,15 @@ function tryFastFieldRecipientFormats_(config, sessionToken, testCall, found) {
   if (userId !== null) {
     add('PascalCase FormId/Users/MergeFields: [user id]', pascal({ Users: [userId] }));
     add('PascalCase FormId/AssignedUserId/MergeFields: user id', pascal({ AssignedUserId: userId }));
+  }
+  // FastField read recipients: [{userId}] and [{email}] (past "recipient not found") and then asked for
+  // a name, so these send one, under the keys it might use.
+  if (userId !== null) add('recipients: [{userId}] + name', base({ recipients: [{ userId: userId }] }), { field: 'recipients', value: found.id });
+  add('recipients: [{email}] + name', base({ recipients: [{ email: email }] }), { field: 'recipients', value: email });
+  if (userId !== null) {
+    add('recipients: [{userId}] + dispatchName', base({ dispatchName: name, recipients: [{ userId: userId }] }));
+    add('recipients: [{userId}] + title', base({ title: name, recipients: [{ userId: userId }] }));
+    add('recipients: [{userId}] + Name', base({ Name: name, recipients: [{ userId: userId }] }));
   }
   let closest = null;
   const seen = {};
