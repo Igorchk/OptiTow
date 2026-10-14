@@ -34,6 +34,7 @@ function configure(env) {
 }
 
 /** The requests to a FastField address, in order. */
+const merged = (payload) => Object.fromEntries(payload.mergeFields.map((e) => [e.fieldKey, e.value]));
 const calls = (env, url) => env.fetchCalls.filter((c) => c.url === url);
 const dispatches = (env) => calls(env, FF_URL);
 const signIns = (env) => env.fetchCalls.filter((c) => c.url.split('?')[0] === AUTH_URL);
@@ -91,15 +92,18 @@ test('dispatch: a won call posts the right request and returns the task id', () 
   const payload = JSON.parse(options.payload);
   assert.equal(payload.formId, 98765);
   assert.equal(typeof payload.formId, 'number');
-  assert.deepEqual(payload.users, ['driver@recoverytowing.example']);
-  assert.equal(payload.autoCreateUsers, false);
+  assert.deepEqual(payload.recipients, [{ email: 'driver@recoverytowing.example' }]);
+  assert.equal(payload.users, undefined);
+  assert.equal(payload.autoCreateUsers, undefined);
   assert.equal(payload.assignedUserId, undefined, 'v1 field is gone');
   assert.equal(payload.fields, undefined, 'v1 field is gone');
   assert.equal(payload.name, 'Tow - 2021 Tesla Model 3 - JOB-0001', 'FastField requires a name for the task');
-  assert.deepEqual(Object.keys(payload).sort(), ['autoCreateUsers', 'formId', 'mergeFields', 'name', 'users']);
-  assert.deepEqual(Object.keys(payload.mergeFields).sort(),
+  assert.deepEqual(Object.keys(payload).sort(), ['formId', 'mergeFields', 'name', 'recipients']);
+  assert.ok(Array.isArray(payload.mergeFields), 'mergeFields is a list of { fieldKey, value }');
+  assert.deepEqual(payload.mergeFields[0], { fieldKey: 'alpha_1', value: 'JOB-0001' });
+  assert.deepEqual(Object.keys(merged(payload)).sort(),
     ['alpha_1', 'alpha_13', 'alpha_3', 'alpha_4', 'alpha_9', 'formattedinput_1', 'listpicker_2', 'multiline_1', 'numeric_1']);
-  assert.deepEqual(payload.mergeFields, {
+  assert.deepEqual(merged(payload), {
     alpha_1: 'JOB-0001', multiline_1: 'No keys | Quoted: $285', formattedinput_1: '916-555-0199', numeric_1: 2021,
     alpha_3: 'Tesla', alpha_4: 'Model 3', alpha_9: 'A', alpha_13: 'B', listpicker_2: 'Standard Tow',
   });
@@ -108,7 +112,7 @@ test('dispatch: a won call posts the right request and returns the task id', () 
 test('dispatch: the outcome text, a missing year and a missing note all behave', () => {
   const env = configure(makeContext());
   env.ctx.dispatchToFastField_({ call_id: 'J', outcome: WON, quoted_price: 100 });
-  const fields = JSON.parse(dispatches(env)[0].options.payload).mergeFields;
+  const fields = merged(JSON.parse(dispatches(env)[0].options.payload));
   assert.equal(fields.numeric_1, null);
   assert.equal(fields.multiline_1, 'Quoted: $100', 'no stray separator when there are no notes');
   assert.equal(fields.alpha_3, '');
@@ -614,9 +618,9 @@ test('testFastFieldDispatch: signs in, checks the forms with the session, then s
   assertSessionHeaders(env.fetchCalls[2]);
   assertSessionHeaders(env.fetchCalls[3]);
   assertSessionHeaders(env.fetchCalls[4]);
-  const sent = JSON.parse(env.fetchCalls[4].options.payload);
-  assert.deepEqual(sent.users, [USER]);
-  assert.equal(sent.autoCreateUsers, false);
+  const sentBody = JSON.parse(env.fetchCalls[4].options.payload);
+  assert.deepEqual(sentBody.recipients, [{ email: USER }]);
+  const sent = Object.assign({}, sentBody, { mergeFields: merged(sentBody) });
   assert.equal(sent.mergeFields.alpha_1, 'TEST-DISPATCH-001');
   assert.equal(sent.mergeFields.alpha_3, 'Honda');
   assert.equal(sent.mergeFields.alpha_4, 'Civic');
@@ -813,33 +817,35 @@ const recipients = (env) => dispatches(env).map((c) => {
   return { users: p.users, userIds: p.userIds, userEmail: p.userEmail };
 });
 
-test('recipient: dispatches name the login email in `users` by default', () => {
+test('recipient: dispatches name the login email in `recipients` by default, as FastField accepted it', () => {
   const env = configure(makeContext());
   env.ctx.dispatchToFastField_({ call_id: 'J', outcome: 1 });
   const payload = JSON.parse(dispatches(env)[0].options.payload);
-  assert.deepEqual(payload.users, [USER]);
+  assert.deepEqual(payload.recipients, [{ email: USER }]);
+  assert.equal(payload.users, undefined);
   assert.equal(payload.userIds, undefined);
   assert.equal(payload.userEmail, undefined);
 });
 
-test('recipient: FASTFIELD_RECIPIENT_ID replaces the email, and FASTFIELD_RECIPIENT_FIELD picks the field', () => {
+test('recipient: a numeric FASTFIELD_RECIPIENT_ID goes in as { userId }; the older fields are still selectable', () => {
   const cases = [
-    [{ FASTFIELD_RECIPIENT_ID: ' "5002" ' }, { users: ['5002'] }],
+    [{ FASTFIELD_RECIPIENT_ID: ' "797771" ' }, { recipients: [{ userId: 797771 }] }],
+    [{ FASTFIELD_RECIPIENT_ID: 'other@x.example' }, { recipients: [{ email: 'other@x.example' }] }],
+    [{ FASTFIELD_RECIPIENT_ID: '5002', FASTFIELD_RECIPIENT_FIELD: 'users' }, { users: ['5002'] }],
     [{ FASTFIELD_RECIPIENT_ID: '5002', FASTFIELD_RECIPIENT_FIELD: 'userIds' }, { userIds: ['5002'] }],
     [{ FASTFIELD_RECIPIENT_FIELD: 'userEmail' }, { userEmail: USER }],
     [{ FASTFIELD_RECIPIENT_FIELD: 'userEmail', FASTFIELD_RECIPIENT_ID: 'other@x.example' }, { userEmail: 'other@x.example' }],
-    [{ FASTFIELD_RECIPIENT_FIELD: 'bogus' }, { users: [USER] }],
+    [{ FASTFIELD_RECIPIENT_FIELD: 'bogus' }, { recipients: [{ email: USER }] }],
   ];
   for (const [props, expected] of cases) {
     const env = configure(makeContext());
     Object.assign(env.props, props);
     env.ctx.dispatchToFastField_({ call_id: 'J', outcome: 1 });
     const payload = JSON.parse(dispatches(env)[0].options.payload);
-    const got = { users: payload.users, userIds: payload.userIds, userEmail: payload.userEmail };
-    for (const key of ['users', 'userIds', 'userEmail']) {
-      assert.deepEqual(got[key], expected[key], JSON.stringify(props) + ' ' + key);
+    for (const key of ['recipients', 'users', 'userIds', 'userEmail']) {
+      assert.deepEqual(payload[key], expected[key], JSON.stringify(props) + ' ' + key);
     }
-    assert.equal(payload.autoCreateUsers, false);
+    assert.equal(payload.autoCreateUsers, undefined);
     assert.equal(payload.formId, 98765);
   }
 });
@@ -924,6 +930,7 @@ test('users: no matching user, an unreadable list and a failed request are logge
 
 test('recipient formats: after "Recipient not found", the user id is tried in `users`, then `userIds`, then the email in `userEmail`', () => {
   const env = configure(makeContext());
+  env.props.FASTFIELD_RECIPIENT_FIELD = 'users';
   env.props.FASTFIELD_USER_ID = 'driver@recoverytowing.example';
   fastFieldServer(env, { dispatch: NO_RECIPIENT });
   env.ctx.testFastFieldDispatch();
@@ -945,6 +952,7 @@ test('recipient formats: after "Recipient not found", the user id is tried in `u
 
 test('recipient formats: stops at the first accepted one and says which settings to use', () => {
   const env = configure(makeContext());
+  env.props.FASTFIELD_RECIPIENT_FIELD = 'users';
   env.props.FASTFIELD_USER_ID = 'driver@recoverytowing.example';
   env.fetcher.respond = (url, options) => {
     if (url === FORMS_URL) return { code: 200, body: JSON.stringify(FORMS) };
@@ -959,6 +967,7 @@ test('recipient formats: stops at the first accepted one and says which settings
   assert.match(log, /set in Script Properties: FASTFIELD_RECIPIENT_ID = 5002 and FASTFIELD_RECIPIENT_FIELD = userIds/);
 
   const idInUsers = configure(makeContext());
+  idInUsers.props.FASTFIELD_RECIPIENT_FIELD = 'users';
   idInUsers.props.FASTFIELD_USER_ID = 'driver@recoverytowing.example';
   idInUsers.fetcher.respond = (url, options) => {
     if (url === FORMS_URL) return { code: 200, body: JSON.stringify(FORMS) };
@@ -972,6 +981,7 @@ test('recipient formats: stops at the first accepted one and says which settings
 
 test('recipient formats: a different error means the recipient was accepted and something else was wrong', () => {
   const env = configure(makeContext());
+  env.props.FASTFIELD_RECIPIENT_FIELD = 'users';
   env.props.FASTFIELD_USER_ID = 'driver@recoverytowing.example';
   env.fetcher.respond = (url, options) => {
     if (url === FORMS_URL) return { code: 200, body: JSON.stringify(FORMS) };
@@ -987,6 +997,7 @@ test('recipient formats: a different error means the recipient was accepted and 
 
 test('recipient formats: without a matching user, only the email formats are tried; a configured id is not repeated', () => {
   const none = configure(makeContext());
+  none.props.FASTFIELD_RECIPIENT_FIELD = 'users';
   fastFieldServer(none, { users: { code: 200, body: JSON.stringify([USERS[0]]) }, dispatch: NO_RECIPIENT });
   none.ctx.testFastFieldDispatch();
   assert.deepEqual(recipients(none).slice(0, 3), [
@@ -996,6 +1007,7 @@ test('recipient formats: without a matching user, only the email formats are tri
   ]);
 
   const configured = configure(makeContext());
+  configured.props.FASTFIELD_RECIPIENT_FIELD = 'users';
   configured.props.FASTFIELD_USER_ID = 'driver@recoverytowing.example';
   configured.props.FASTFIELD_RECIPIENT_ID = '5002';
   fastFieldServer(configured, { dispatch: NO_RECIPIENT });
@@ -1093,7 +1105,7 @@ test('sanitize: pasted FastField settings are cleaned before use', () => {
   assertSessionHeaders(dispatches(env)[0]);
   const payload = JSON.parse(dispatches(env)[0].options.payload);
   assert.equal(payload.formId, 98765);
-  assert.deepEqual(payload.users, [USER]);
+  assert.deepEqual(payload.recipients, [{ email: USER }]);
 });
 
 test('sanitize: a property that is only whitespace or quotes counts as missing', () => {
@@ -1483,6 +1495,7 @@ test('production guard: a crash while dispatching a live call is swallowed and l
 
 test('recipient matrix: a 500 is not an acceptance, the next shapes are still tried, and the closest is named', () => {
   const env = configure(makeContext());
+  env.props.FASTFIELD_RECIPIENT_FIELD = 'users';
   env.props.FASTFIELD_USER_ID = 'driver@recoverytowing.example';
   env.fetcher.respond = (url, options) => {
     if (url === FORMS_URL) return { code: 200, body: JSON.stringify(FORMS) };
@@ -1563,4 +1576,10 @@ test('diagnostic route: a huge FastField answer is cut down so the report can st
   assert.match(dispatch.body, /dispatchId/);
   assert.equal(report.dispatched, true);
   assert.equal(typeof report.result, 'string');
+});
+
+test('dispatch: FastField\'s `objectId` is the task id that is stored', () => {
+  const env = configure(makeContext());
+  env.fetcher.respond = () => ({ code: 201, body: '{"objectId":30419815,"recipients":[{"id":40205896,"email":"a@b.example","isAnonDispatch":false}],"createdAt":"2026-10-14T11:00:20.913Z"}' });
+  assert.equal(env.ctx.dispatchToFastField_({ call_id: 'J', outcome: 1 }), '30419815');
 });

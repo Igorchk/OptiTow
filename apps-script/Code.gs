@@ -1204,7 +1204,7 @@ const FASTFIELD_RECIPIENT_FIELDS = Object.freeze(['users', 'userIds', 'userEmail
 /** Who a dispatch goes to: { field, value }, from the optional RECIPIENT properties, else the login email. */
 function fastFieldRecipient_(config) {
   const field = FASTFIELD_RECIPIENT_FIELDS.indexOf(config.FASTFIELD_RECIPIENT_FIELD) !== -1
-    ? config.FASTFIELD_RECIPIENT_FIELD : 'users';
+    ? config.FASTFIELD_RECIPIENT_FIELD : 'recipients';
   return { field: field, value: config.FASTFIELD_RECIPIENT_ID || config.FASTFIELD_USER_ID };
 }
 
@@ -1215,33 +1215,46 @@ function fastFieldDispatchName_(callData) {
   return ['Tow', car, callData.call_id].filter(Boolean).join(' - ');
 }
 
-/** The dispatch body: the form, who it goes to (`recipient`: { field, value }), and the merge fields that pre-fill the job. */
-function buildFastFieldPayload_(callData, formId, recipient) {
+/** The merge fields that pre-fill the job, by FastField field key. */
+function fastFieldMergeFields_(callData) {
   const notes = callData.notes_comments === undefined || callData.notes_comments === null
     ? '' : String(callData.notes_comments).trim();
   const quote = callData.quoted_price ? 'Quoted: $' + callData.quoted_price : '';
   const text = function (v) { return v === undefined || v === null ? '' : v; };
+  return {
+    alpha_1: callData.call_id,
+    multiline_1: [notes, quote].filter(Boolean).join(' | '),
+    formattedinput_1: text(callData.customer_phone),
+    numeric_1: Number(callData.vehicle_year) || null,
+    alpha_3: text(callData.vehicle_make),
+    alpha_4: text(callData.vehicle_model),
+    alpha_9: text(callData.pickup_address),
+    alpha_13: text(callData.dropoff_address),
+    listpicker_2: text(callData.service_requested),
+  };
+}
+
+/** `mergeFields` as FastField's dispatch wants it: a list of { fieldKey, value }. */
+function fastFieldMergeFieldList_(fields) {
+  return Object.keys(fields).map(function (key) { return { fieldKey: key, value: fields[key] }; });
+}
+
+/**
+ * The dispatch body, in the shape FastField accepted (HTTP 201, confirmed live): the form, a task
+ * name, who it goes to (`recipient`: { field, value }) and the merge fields as a { fieldKey, value }
+ * list. By default the recipient is `recipients: [{ userId }]` (a numeric FASTFIELD_RECIPIENT_ID) or
+ * `[{ email }]`; the older `users`, `userIds` and `userEmail` fields are still selectable.
+ */
+function buildFastFieldPayload_(callData, formId, recipient) {
   const payload = {
     formId: formId,
     name: fastFieldDispatchName_(callData),
-    autoCreateUsers: false,
-    mergeFields: {
-      alpha_1: callData.call_id,
-      multiline_1: [notes, quote].filter(Boolean).join(' | '),
-      formattedinput_1: text(callData.customer_phone),
-      numeric_1: Number(callData.vehicle_year) || null,
-      alpha_3: text(callData.vehicle_make),
-      alpha_4: text(callData.vehicle_model),
-      alpha_9: text(callData.pickup_address),
-      alpha_13: text(callData.dropoff_address),
-      listpicker_2: text(callData.service_requested),
-    },
+    mergeFields: fastFieldMergeFieldList_(fastFieldMergeFields_(callData)),
   };
-  // `users` and `userIds` take a list; `userEmail` a single address; `recipients` a list of objects,
-  // each naming the user by id when the value is a number, else by email.
   if (recipient.field === 'recipients') {
     payload.recipients = [/^\d+$/.test(String(recipient.value)) ? { userId: Number(recipient.value) } : { email: recipient.value }];
   } else {
+    // `users` and `userIds` take a list; `userEmail` a single address.
     payload[recipient.field] = recipient.field === 'userEmail' ? recipient.value : [recipient.value];
   }
   return payload;
@@ -1387,7 +1400,7 @@ function postFastFieldDispatch_(subscriptionKey, sessionToken, payload, url) {
     if (typeof response.getAllHeaders === 'function') result.headers = response.getAllHeaders();
     traceFastField_('POST', url || CONFIG.FASTFIELD_DISPATCH_URL, result.code, result.headers, result.text);
     try { result.parsed = JSON.parse(result.text); } catch (_) { result.parsed = null; }
-    const found = result.parsed && (result.parsed.dispatchId || result.parsed.taskId || result.parsed.id);
+    const found = result.parsed && (result.parsed.objectId || result.parsed.dispatchId || result.parsed.taskId || result.parsed.id);
     if (found) result.id = String(found);
   } catch (err) {
     result.error = redactSecrets_(String(err && err.message ? err.message : err), [subscriptionKey, sessionToken]);
@@ -1420,7 +1433,7 @@ function dispatchToFastField_(callData) {
     return null;
   }
   if (!result.id) {
-    console.error('FastField dispatch answered HTTP ' + result.code + ' without a dispatchId, taskId or id: ' + result.text.slice(0, 500));
+    console.error('FastField dispatch answered HTTP ' + result.code + ' without an objectId, dispatchId, taskId or id: ' + result.text.slice(0, 500));
     return null;
   }
   return result.id;
@@ -1801,7 +1814,7 @@ function tryFastFieldRecipientFormats_(config, sessionToken, testCall, found, fr
   const formId = Number(config.FASTFIELD_FORM_ID);
   const first = fastFieldRecipient_(config);
   const email = config.FASTFIELD_USER_ID;
-  const fields = buildFastFieldPayload_(testCall, formId, first).mergeFields;
+  const fields = fastFieldMergeFields_(testCall);
   const userId = found && found.id ? (isFinite(Number(found.id)) ? Number(found.id) : found.id) : null;
   const candidates = [];
   // A candidate: a label (the email shown as <email>), the whole body, and, for the three shapes the
