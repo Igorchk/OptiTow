@@ -98,6 +98,7 @@ function makeContext(seed) {
     }),
   };
   const geocodeCalls = [];
+  const sleeps = [];
   const ctx = {
     console: { log() {}, warn: (...a) => logs.warn.push(a.join(' ')), error: (...a) => logs.error.push(a.join(' ')) },
     SpreadsheetApp: { getActiveSpreadsheet: () => ss, flush() {} },
@@ -148,6 +149,7 @@ function makeContext(seed) {
     },
     Utilities: {
       getUuid: () => crypto.randomUUID(),
+      sleep: (ms) => { sleeps.push(ms); },
       DigestAlgorithm: { MD5: 'md5' },
       computeDigest: (alg, s) => [...crypto.createHash(alg).update(s).digest()],
       base64Encode: (s) => Buffer.from(s, 'utf8').toString('base64'),
@@ -193,7 +195,7 @@ function makeContext(seed) {
   return {
     ctx, sheet: sheets['Call Log'], ref: sheets['Reference Data'], mapsCalls,
     props, fetchCalls, fetcher, logs, lock, logger,
-    cache, cacheTtls, geocodeCalls,
+    cache, cacheTtls, geocodeCalls, sleeps,
     /** Simulates the 15 minutes passing. */
     expireCache: () => cache.clear(),
   };

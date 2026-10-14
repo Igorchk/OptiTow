@@ -1500,3 +1500,33 @@ test('recipient matrix: a 500 is not an acceptance, the next shapes are still tr
   assert.match(logText(env), /ACCEPTED with recipients: \[\{id, isAnonymousDispatch:false\}\]/);
   assert.match(logText(env), /Winning payload schema: .*"recipients":\[\{"id":5002,"isAnonymousDispatch":false\}\]/);
 });
+
+test('recipient matrix: a 429 is waited out and retried, never taken for an acceptance', () => {
+  const env = configure(makeContext());
+  env.props.FASTFIELD_USER_ID = 'driver@recoverytowing.example';
+  let limited = 0;
+  env.fetcher.respond = (url, options) => {
+    if (url === FORMS_URL) return { code: 200, body: JSON.stringify(FORMS) };
+    if (url === USERS_URL) return { code: 200, body: JSON.stringify(USERS) };
+    if (url === GROUPS_URL) return { code: 200, body: '[]' };
+    const b = JSON.parse(options.payload);
+    if (b.userEmail && limited++ < 2) return { code: 429, body: '{ "statusCode": 429, "message": "Rate limit is exceeded. Try again in 35 seconds." }' };
+    return NO_RECIPIENT;
+  };
+  env.ctx.testFastFieldDispatch();
+  assert.deepEqual([...env.sleeps], [36000, 36000]);
+  assert.ok(!/ACCEPTED|different answer/.test(logText(env)));
+  assert.match(logText(env), /rate limited \(HTTP 429\); waiting 36 s/);
+  assert.equal(dispatches(env).length, 25, '23 shapes, plus the 2 repeated');
+
+  const stuck = configure(makeContext());
+  stuck.fetcher.respond = (url) => (url === FORMS_URL ? { code: 200, body: JSON.stringify(FORMS) }
+    : url === USERS_URL ? { code: 200, body: JSON.stringify(USERS) } : url === GROUPS_URL ? { code: 200, body: '[]' }
+      : { code: 404, body: NO_RECIPIENT.body });
+  stuck.fetcher.respond = ((inner) => (url, options) => {
+    if (url === FF_URL && JSON.parse(options.payload).users && JSON.parse(options.payload).users[0] === '5002') return { code: 429, body: 'slow down' };
+    return inner(url, options);
+  })(stuck.fetcher.respond);
+  stuck.ctx.testFastFieldDispatch();
+  assert.match(logText(stuck), /Stopped: still rate limited/);
+});

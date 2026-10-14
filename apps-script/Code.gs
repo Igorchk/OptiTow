@@ -1820,7 +1820,19 @@ function tryFastFieldRecipientFormats_(config, sessionToken, testCall, found) {
     const c = candidates[i];
     if (seen[c.label]) continue;
     seen[c.label] = true;
-    const attempt = postFastFieldDispatch_(config.FASTFIELD_SUBSCRIPTION_KEY, sessionToken, c.payload, undefined);
+    let attempt = postFastFieldDispatch_(config.FASTFIELD_SUBSCRIPTION_KEY, sessionToken, c.payload, undefined);
+    // The gateway limits requests per minute: wait out a 429 and send the same shape again.
+    for (let wait = 0; attempt.code === 429 && wait < 3; wait++) {
+      const asked = /(\d+)\s*second/i.exec(attempt.text);
+      const seconds = Math.min(Math.max(asked ? Number(asked[1]) + 1 : 15, 5), 60);
+      diag_('  ' + c.label + ': rate limited (HTTP 429); waiting ' + seconds + ' s and trying the same shape again.');
+      Utilities.sleep(seconds * 1000);
+      attempt = postFastFieldDispatch_(config.FASTFIELD_SUBSCRIPTION_KEY, sessionToken, c.payload, undefined);
+    }
+    if (attempt.code === 429) {
+      diag_('Stopped: still rate limited by FastField. Run the diagnostic again in a minute.');
+      return null;
+    }
     if (attempt.error) {
       diag_('  ' + c.label + ': request failed (' + attempt.error + ')');
       continue;
