@@ -101,11 +101,12 @@ test('dispatch: a won call posts the right request and returns the task id', () 
   assert.deepEqual(Object.keys(payload).sort(), ['formId', 'mergeFields', 'name', 'recipients']);
   assert.ok(Array.isArray(payload.mergeFields), 'mergeFields is a list of { fieldKey, value }');
   assert.deepEqual(payload.mergeFields[0], { fieldKey: 'alpha_1', value: 'JOB-0001' });
-  assert.deepEqual(Object.keys(merged(payload)).sort(),
-    ['alpha_1', 'alpha_13', 'alpha_3', 'alpha_4', 'alpha_9', 'formattedinput_1', 'listpicker_2', 'multiline_1', 'numeric_1']);
   assert.deepEqual(merged(payload), {
-    alpha_1: 'JOB-0001', multiline_1: 'No keys | Quoted: $285', formattedinput_1: '916-555-0199', numeric_1: 2021,
-    alpha_3: 'Tesla', alpha_4: 'Model 3', alpha_9: 'A', alpha_13: 'B', listpicker_2: 'Standard Tow',
+    alpha_1: 'JOB-0001', multiline_1: 'No keys', formattedinput_1: '916-555-0199', numeric_1: 2021,
+    alpha_3: 'Tesla', alpha_4: 'Model 3',
+    alpha_9: 'A', alpha_10: '', alpha_11: '',
+    alpha_13: 'B', alpha_14: '', alpha_15: '',
+    listpicker_1: 'Break Down', listpicker_2: 'Standard Tow', numeric_4: 285,
   });
 });
 
@@ -114,7 +115,8 @@ test('dispatch: the outcome text, a missing year and a missing note all behave',
   env.ctx.dispatchToFastField_({ call_id: 'J', outcome: WON, quoted_price: 100 });
   const fields = merged(JSON.parse(dispatches(env)[0].options.payload));
   assert.equal(fields.numeric_1, null);
-  assert.equal(fields.multiline_1, 'Quoted: $100', 'no stray separator when there are no notes');
+  assert.equal(fields.multiline_1, '', 'the quote is no longer part of the notes');
+  assert.equal(fields.numeric_4, 100);
   assert.equal(fields.alpha_3, '');
 });
 
@@ -625,9 +627,16 @@ test('testFastFieldDispatch: signs in, checks the forms with the session, then s
   assert.equal(sent.mergeFields.alpha_3, 'Honda');
   assert.equal(sent.mergeFields.alpha_4, 'Civic');
   assert.equal(sent.mergeFields.numeric_1, 2022);
-  assert.equal(sent.mergeFields.alpha_9, 'Roseville, CA');
-  assert.equal(sent.mergeFields.alpha_13, 'Sacramento, CA');
-  assert.match(sent.mergeFields.multiline_1, /TEST DISPATCH.*Quoted: \$150/);
+  assert.equal(sent.mergeFields.alpha_9, '965 Riverside Ave');
+  assert.equal(sent.mergeFields.alpha_10, 'Roseville');
+  assert.equal(sent.mergeFields.alpha_11, 'CA');
+  assert.equal(sent.mergeFields.numeric_2, 95678);
+  assert.equal(sent.mergeFields.alpha_13, '123 Main St');
+  assert.equal(sent.mergeFields.alpha_14, 'Sacramento');
+  assert.equal(sent.mergeFields.numeric_3, 95814);
+  assert.equal(sent.mergeFields.listpicker_1, 'Flat Tire');
+  assert.equal(sent.mergeFields.numeric_4, 150);
+  assert.equal(sent.mergeFields.multiline_1, 'TEST DISPATCH, safe to delete');
 
   const log = logText(env);
   assert.match(log, /Step 1 of 4[\s\S]*Session token \(from a new sign-in\): present, 32 characters, masked 0f1e\.\.\.e1f0, 32-character hex: true/);
@@ -1428,7 +1437,7 @@ test('recipient matrix: every candidate shape is tried in order, with the same m
   const listed = all.slice(10);
   assert.deepEqual(listed.map((b) => Object.keys(b.mergeFields[0])), [['fieldKey', 'value'], ['fieldKey', 'value'], ['fieldKey', 'fieldValue'], ['fieldKey', 'fieldValue']]);
   assert.deepEqual(listed[0].mergeFields.find((e) => e.fieldKey === 'alpha_3'), { fieldKey: 'alpha_3', value: 'Honda' });
-  assert.equal(listed[0].mergeFields.length, 9);
+  assert.equal(listed[0].mergeFields.length, 17);
   all.forEach((b, i) => assertSessionHeaders(dispatches(env)[i]));
   assert.match(logText(env), /No way of naming the recipient was accepted/);
   noSecrets(env);
@@ -1582,4 +1591,86 @@ test('dispatch: FastField\'s `objectId` is the task id that is stored', () => {
   const env = configure(makeContext());
   env.fetcher.respond = () => ({ code: 201, body: '{"objectId":30419815,"recipients":[{"id":40205896,"email":"a@b.example","isAnonDispatch":false}],"createdAt":"2026-10-14T11:00:20.913Z"}' });
   assert.equal(env.ctx.dispatchToFastField_({ call_id: 'J', outcome: 1 }), '30419815');
+});
+
+// ---- field mapping: addresses, problem reported, card amount, notes ----
+
+const parse = (env, address) => JSON.parse(JSON.stringify(env.ctx.parseAddressComponents_(address)));
+
+test('address parsing: street, city, 2-letter state and a numeric ZIP', () => {
+  const env = makeContext();
+  assert.deepEqual(parse(env, '965 Riverside Ave, Roseville, CA 95678'), { street: '965 Riverside Ave', city: 'Roseville', state: 'CA', zip: 95678 });
+  assert.deepEqual(parse(env, '123 Main St, Sacramento, CA 95814'), { street: '123 Main St', city: 'Sacramento', state: 'CA', zip: 95814 });
+  assert.deepEqual(parse(env, '  123 Main St ,  Sacramento ,  ca  95814 '), { street: '123 Main St', city: 'Sacramento', state: 'CA', zip: 95814 }, 'trimmed, state upper-cased');
+  assert.deepEqual(parse(env, '123 Main St, Suite 5, Sacramento, CA 95814'), { street: '123 Main St, Suite 5', city: 'Sacramento', state: 'CA', zip: 95814 }, 'the city is the part before the state');
+  assert.deepEqual(parse(env, '965 Riverside Ave, Roseville, CA 95678, USA'), { street: '965 Riverside Ave', city: 'Roseville', state: 'CA', zip: 95678 }, 'a trailing country is dropped');
+  assert.deepEqual(parse(env, '965 Riverside Ave, Roseville, CA 95678-1234'), { street: '965 Riverside Ave', city: 'Roseville', state: 'CA', zip: 95678 }, 'ZIP+4 keeps 5 digits');
+  assert.deepEqual(parse(env, '965 Riverside Ave, Roseville, CA'), { street: '965 Riverside Ave', city: 'Roseville', state: 'CA', zip: null }, 'no ZIP');
+  assert.equal(typeof parse(env, '965 Riverside Ave, Roseville, CA 95678').zip, 'number');
+});
+
+test('address parsing: roadside or freeform text goes whole into the street', () => {
+  const env = makeContext();
+  for (const text of ['I-80 EB past Exit 98', 'Roseville, CA', 'In front of the Walmart', 'Hwy 99 NB at Elkhorn, Sacramento']) {
+    assert.deepEqual(parse(env, text), { street: text, city: '', state: '', zip: null }, text);
+  }
+  for (const empty of ['', '   ', undefined, null]) {
+    assert.deepEqual(parse(env, empty), { street: '', city: '', state: '', zip: null });
+  }
+});
+
+const sentFields = (call) => {
+  const env = configure(makeContext());
+  env.ctx.dispatchToFastField_(Object.assign({ call_id: 'J', outcome: WON }, call));
+  return merged(JSON.parse(dispatches(env)[0].options.payload));
+};
+
+test('dispatch fields: pickup and dropoff are split into street, city, state and a numeric ZIP', () => {
+  const f = sentFields({ pickup_address: '965 Riverside Ave, Roseville, CA 95678', dropoff_address: '123 Main St, Sacramento, CA 95814' });
+  assert.deepEqual([f.alpha_9, f.alpha_10, f.alpha_11, f.numeric_2], ['965 Riverside Ave', 'Roseville', 'CA', 95678]);
+  assert.deepEqual([f.alpha_13, f.alpha_14, f.alpha_15, f.numeric_3], ['123 Main St', 'Sacramento', 'CA', 95814]);
+  assert.equal(typeof f.numeric_2, 'number');
+  assert.equal(typeof f.numeric_3, 'number');
+});
+
+test('dispatch fields: a roadside address leaves city, state and ZIP empty, and the ZIP key is left out', () => {
+  const f = sentFields({ pickup_address: 'I-80 EB past Exit 98', dropoff_address: '123 Main St, Sacramento, CA 95814' });
+  assert.deepEqual([f.alpha_9, f.alpha_10, f.alpha_11], ['I-80 EB past Exit 98', '', '']);
+  assert.ok(!('numeric_2' in f), 'no ZIP, no numeric_2');
+  assert.equal(f.numeric_3, 95814);
+  const none = sentFields({});
+  assert.ok(!('numeric_2' in none) && !('numeric_3' in none));
+  assert.equal(none.alpha_9, '');
+});
+
+test('dispatch fields: Problem Reported (listpicker_1) comes from the vehicle condition and the service', () => {
+  const cases = [
+    [{ vehicle_condition: 'Collision' }, 'Accident'],
+    [{ vehicle_condition: 'Collision', service_requested: 'Tire Change' }, 'Accident'],
+    [{ vehicle_condition: 'Flat Tire' }, 'Flat Tire'],
+    [{ service_requested: 'Tire Change' }, 'Flat Tire'],
+    [{ service_requested: 'Tire Patch' }, 'Flat Tire'],
+    [{ vehicle_condition: 'No Keys' }, 'No Key'],
+    [{ vehicle_condition: 'Ditch / Mud / Winch' }, 'Recovery'],
+    [{ service_requested: 'Winch Out + Tow' }, 'Recovery'],
+    [{ service_requested: 'Winch Out Only', vehicle_condition: 'Rolling / Neutral' }, 'Recovery'],
+    [{ vehicle_condition: 'Mechanical / Electrical Issue', service_requested: 'Standard Tow' }, 'Break Down'],
+    [{ vehicle_condition: 'Wheel Damaged' }, 'Break Down'],
+    [{ service_requested: 'Jump Start' }, 'Break Down'],
+    [{}, 'Break Down'],
+  ];
+  for (const [call, expected] of cases) assert.equal(sentFields(call).listpicker_1, expected, JSON.stringify(call));
+  assert.equal(sentFields({ service_requested: 'Standard Tow' }).listpicker_2, 'Standard Tow', 'Service Performed is still sent');
+  assert.ok(['Accident', 'Break Down', 'Flat Tire', 'Recovery', 'No Key'].includes(sentFields({ vehicle_condition: 'anything' }).listpicker_1));
+});
+
+test('dispatch fields: the quote goes to numeric_4 as a number and the notes stay on their own', () => {
+  const f = sentFields({ quoted_price: 285, notes_comments: '  Gate code 4411  ' });
+  assert.equal(f.numeric_4, 285);
+  assert.equal(f.multiline_1, 'Gate code 4411');
+  assert.equal(sentFields({ quoted_price: '199.50' }).numeric_4, 199.5, 'a text price becomes a number');
+  assert.equal(sentFields({}).numeric_4, 0);
+  assert.equal(sentFields({ quoted_price: 'abc' }).numeric_4, 0);
+  assert.equal(sentFields({ notes_comments: null }).multiline_1, '');
+  assert.ok(!JSON.stringify(sentFields({ quoted_price: 285, notes_comments: 'x' })).includes('Quoted'));
 });
