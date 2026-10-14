@@ -1250,6 +1250,7 @@ function buildFastFieldPayload_(callData, formId, recipient) {
 // While the diagnostic runs over HTTP (?action=test_fastfield), every FastField request and every
 // diagnostic line is also collected here so it can be returned as one JSON report. null otherwise.
 let fastFieldTrace_ = null;
+const FASTFIELD_TRACE_BODY_LIMIT = 3000;
 
 /** A diagnostic line: to the Apps Script log, and into the HTTP report when one is being built. */
 function diag_(message) {
@@ -1273,7 +1274,14 @@ function traceFastField_(method, url, code, headers, text) {
     if (body.sessionToken) body.sessionToken = maskToken_(body.sessionToken);
     if (body.data && typeof body.data === 'object' && body.data.sessionToken) body.data.sessionToken = maskToken_(body.data.sessionToken);
   }
-  fastFieldTrace_.requests.push({ method: method, url: String(url).split('?')[0], status: code, responseHeaders: redactHeaders_(headers), body: body });
+  // A dispatch answer can carry the whole form; keep the report small enough to be returned.
+  const size = JSON.stringify(body === undefined ? null : body).length;
+  const entry = { method: method, url: String(url).split('?')[0], status: code, responseHeaders: redactHeaders_(headers), body: body };
+  if (size > FASTFIELD_TRACE_BODY_LIMIT) {
+    entry.body = JSON.stringify(body).slice(0, FASTFIELD_TRACE_BODY_LIMIT) + '...';
+    entry.bodyChars = size;
+  }
+  fastFieldTrace_.requests.push(entry);
 }
 
 /** Response headers with the ones that carry cookies, tokens or keys hidden, for logs and reports. */
@@ -1319,7 +1327,10 @@ function fastFieldTestRoute_(params) {
   const dispatched = trace.requests.some(function (r) {
     return r.method === 'POST' && r.url === CONFIG.FASTFIELD_DISPATCH_URL && (r.status === 200 || r.status === 201);
   });
-  const report = { ok: !error, action: 'test_fastfield', dispatched: dispatched, result: result, requests: trace.requests, log: trace.log };
+  let shown = result;
+  const resultText = JSON.stringify(result === undefined ? null : result);
+  if (resultText.length > FASTFIELD_TRACE_BODY_LIMIT) shown = resultText.slice(0, FASTFIELD_TRACE_BODY_LIMIT) + '...';
+  const report = { ok: !error, action: 'test_fastfield', dispatched: dispatched, result: shown, requests: trace.requests, log: trace.log };
   if (error) report.error = error;
   return json_(report);
 }
@@ -1676,7 +1687,7 @@ function testFastFieldDispatch(options) {
   if (result.retried) diag_('The first attempt got HTTP 401, so a fresh session was started and the dispatch retried once.');
   diag_('HTTP status: ' + result.code);
   diag_('Response headers: ' + JSON.stringify(redactHeaders_(result.headers)));
-  if (result.parsed) diag_('Parsed response: ' + JSON.stringify(result.parsed));
+  if (result.parsed) diag_('Parsed response: ' + JSON.stringify(result.parsed).slice(0, 2000));
   else diag_('Response body (not JSON): ' + result.text.slice(0, 1000));
   if (result.code === 200 || result.code === 201) {
     diag_(result.id

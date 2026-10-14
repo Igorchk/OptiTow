@@ -1549,3 +1549,18 @@ test('diagnostic route: from/count run only that slice of the recipient shapes, 
   assert.deepEqual(sent.map((b) => b.recipients && Object.keys(b.recipients[0])), [['userId'], ['email']]);
   assert.match(report.log.join('\n'), /Skipping the first send; trying recipient shapes 4 to 5 only/);
 });
+
+test('diagnostic route: a huge FastField answer is cut down so the report can still be returned', () => {
+  const env = configure(makeContext());
+  const huge = { dispatchId: 'T-1', form: 'x'.repeat(200000) };
+  fastFieldServer(env, { dispatch: { code: 201, body: JSON.stringify(huge) } });
+  const text = JSON.stringify(get(env, DIAG));
+  assert.ok(text.length < 30000, 'report is ' + text.length);
+  const report = JSON.parse(text);
+  const dispatch = report.requests.find((r) => r.url === FF_URL);
+  assert.equal(dispatch.status, 201);
+  assert.ok(dispatch.bodyChars > 200000);
+  assert.match(dispatch.body, /dispatchId/);
+  assert.equal(report.dispatched, true);
+  assert.equal(typeof report.result, 'string');
+});
