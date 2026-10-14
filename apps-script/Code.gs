@@ -31,6 +31,9 @@
  *                     Receipt_PDF_URL (written by the return webhook when the form is completed)
  */
 
+// FastField's v3 API root; the FastField addresses in CONFIG are built from it.
+const FASTFIELD_API_BASE = 'https://api.fastfieldforms.com/services/v3';
+
 const CONFIG = Object.freeze({
   CALL_LOG_SHEET: 'Call Log',
   REFERENCE_SHEET: 'Reference Data',
@@ -47,10 +50,13 @@ const CONFIG = Object.freeze({
   ROW_GROWTH: 500,
   // How long a customer's shared location stays readable (and how long a link stays valid).
   LOCATION_TTL_SECONDS: 15 * 60,
-  // FastField's v3 API. The one place these addresses live. (v1 does not exist; the gateway answers 404.)
-  FASTFIELD_DISPATCH_URL: 'https://api.fastfieldforms.com/services/v3/dispatches',
-  FASTFIELD_FORMS_URL: 'https://api.fastfieldforms.com/services/v3/forms',
-  FASTFIELD_AUTH_URL: 'https://api.fastfieldforms.com/services/v3/authenticate',
+  // FastField's v3 API: the one place these addresses live. The gateway answers 404 for v1 and for
+  // the plural /dispatches; the dispatch route is the singular /dispatch.
+  FASTFIELD_DISPATCH_URL: FASTFIELD_API_BASE + '/dispatch',
+  FASTFIELD_FORMS_URL: FASTFIELD_API_BASE + '/forms',
+  FASTFIELD_AUTH_URL: FASTFIELD_API_BASE + '/authenticate',
+  // Only tried by testFastFieldDispatch's route discovery, if the dispatch address above is a 404.
+  FASTFIELD_TASKS_URL: FASTFIELD_API_BASE + '/tasks',
   // The login session token is cached for at most this long (the longest CacheService allows), and
   // for less if FastField says it expires sooner.
   FASTFIELD_SESSION_TTL_SECONDS: 21600,
@@ -1186,6 +1192,31 @@ function clearFastFieldSessionToken_() {
   CacheService.getScriptCache().remove(CONFIG.FASTFIELD_SESSION_CACHE_KEY);
 }
 
+/** The dispatch body: the form, who it goes to, and the merge fields that pre-fill the job. */
+function buildFastFieldPayload_(callData, formId, userId) {
+  const notes = callData.notes_comments === undefined || callData.notes_comments === null
+    ? '' : String(callData.notes_comments).trim();
+  const quote = callData.quoted_price ? 'Quoted: $' + callData.quoted_price : '';
+  const text = function (v) { return v === undefined || v === null ? '' : v; };
+  const payload = {
+    formId: formId,
+    users: [userId],
+    autoCreateUsers: false,
+    mergeFields: {
+      alpha_1: callData.call_id,
+      multiline_1: [notes, quote].filter(Boolean).join(' | '),
+      formattedinput_1: text(callData.customer_phone),
+      numeric_1: Number(callData.vehicle_year) || null,
+      alpha_3: text(callData.vehicle_make),
+      alpha_4: text(callData.vehicle_model),
+      alpha_9: text(callData.pickup_address),
+      alpha_13: text(callData.dropoff_address),
+      listpicker_2: text(callData.service_requested),
+    },
+  };
+  return payload;
+}
+
 /**
  * Sends a won call to FastField as a pre-filled task and reports everything about the answer:
  * { code, headers, text, parsed, id, error }. Returns null, after logging why, when nothing was
@@ -1202,26 +1233,7 @@ function sendFastFieldDispatch_(callData) {
     return null;
   }
 
-  const notes = callData.notes_comments === undefined || callData.notes_comments === null
-    ? '' : String(callData.notes_comments).trim();
-  const quote = callData.quoted_price ? 'Quoted: $' + callData.quoted_price : '';
-  const text = function (v) { return v === undefined || v === null ? '' : v; };
-  const payload = {
-    formId: formId,
-    users: [config.FASTFIELD_USER_ID],
-    autoCreateUsers: false,
-    mergeFields: {
-      alpha_1: callData.call_id,
-      multiline_1: [notes, quote].filter(Boolean).join(' | '),
-      formattedinput_1: text(callData.customer_phone),
-      numeric_1: Number(callData.vehicle_year) || null,
-      alpha_3: text(callData.vehicle_make),
-      alpha_4: text(callData.vehicle_model),
-      alpha_9: text(callData.pickup_address),
-      alpha_13: text(callData.dropoff_address),
-      listpicker_2: text(callData.service_requested),
-    },
-  };
+  const payload = buildFastFieldPayload_(callData, formId, config.FASTFIELD_USER_ID);
 
   const token = getFastFieldSessionToken_();
   if (!token) {
@@ -1241,11 +1253,11 @@ function sendFastFieldDispatch_(callData) {
   return result;
 }
 
-/** One POST of a dispatch: { code, headers, text, parsed, id, error }. */
-function postFastFieldDispatch_(subscriptionKey, sessionToken, payload) {
+/** One POST of a dispatch (to `url`, by default the dispatch address): { code, headers, text, parsed, id, error }. */
+function postFastFieldDispatch_(subscriptionKey, sessionToken, payload, url) {
   const result = { code: 0, headers: {}, text: '', parsed: null, id: '', error: '' };
   try {
-    const response = UrlFetchApp.fetch(CONFIG.FASTFIELD_DISPATCH_URL, {
+    const response = UrlFetchApp.fetch(url || CONFIG.FASTFIELD_DISPATCH_URL, {
       method: 'post',
       contentType: 'application/json',
       headers: getFastFieldHeaders_(subscriptionKey, sessionToken),
@@ -1503,7 +1515,7 @@ function testFastFieldDispatch() {
   }
 
   Logger.log('Step 3 of 3: sending a TEST task (it will show up on the driver\'s list; delete it afterwards).');
-  const result = sendFastFieldDispatch_({
+  const testCall = {
     call_id: 'TEST-DISPATCH-001',
     outcome: OUTCOME_WON,
     customer_phone: '916-555-0100',
@@ -1515,7 +1527,8 @@ function testFastFieldDispatch() {
     dropoff_address: 'Sacramento, CA',
     quoted_price: 150,
     notes_comments: 'TEST DISPATCH, safe to delete',
-  });
+  };
+  const result = sendFastFieldDispatch_(testCall);
   if (!result) {
     Logger.log('Nothing was sent (see above).');
     return null;
@@ -1538,11 +1551,52 @@ function testFastFieldDispatch() {
   } else if (result.code === 401 || result.code === 403) {
     Logger.log('Rejected: the session or subscription key was not accepted for dispatching.');
   } else if (result.code === 404) {
-    Logger.log('Not found: check CONFIG.FASTFIELD_DISPATCH_URL.');
+    Logger.log('Not found: ' + CONFIG.FASTFIELD_DISPATCH_URL + ' is not a route the gateway knows. Looking for the right one:');
+    discoverFastFieldDispatchRoute_(config, getFastFieldSessionToken_(), testCall);
   } else {
     Logger.log('Rejected: see the reply above for FastField\'s reason.');
   }
   return result.parsed;
+}
+
+/**
+ * After the dispatch address answers 404, tries the other routes a dispatch might live at, each with
+ * the same body and session, and logs the exact status and reply of every one. It stops at the first
+ * route that is not a 404: that is the one the gateway recognizes (a 400 or 422 still means the route
+ * exists and only the body needs adjusting). A route that accepts the request creates a real test
+ * task, so it stops there rather than trying more.
+ */
+function discoverFastFieldDispatchRoute_(config, sessionToken, testCall) {
+  if (!sessionToken) {
+    Logger.log('No session token, so no other routes were tried.');
+    return null;
+  }
+  const formId = Number(config.FASTFIELD_FORM_ID);
+  const payload = buildFastFieldPayload_(testCall, formId, config.FASTFIELD_USER_ID);
+  const routes = [
+    CONFIG.FASTFIELD_FORMS_URL + '/' + formId + '/dispatch',
+    CONFIG.FASTFIELD_TASKS_URL,
+  ];
+  for (let i = 0; i < routes.length; i++) {
+    const attempt = postFastFieldDispatch_(config.FASTFIELD_SUBSCRIPTION_KEY, sessionToken, payload, routes[i]);
+    if (attempt.error) {
+      Logger.log('  POST ' + routes[i] + ': request failed (' + attempt.error + ')');
+      continue;
+    }
+    Logger.log('  POST ' + routes[i] + ': HTTP ' + attempt.code + ' ' + attempt.text.slice(0, 1000));
+    if (attempt.code !== 404) {
+      if (attempt.code === 200 || attempt.code === 201) {
+        Logger.log('The gateway ACCEPTED ' + routes[i] + (attempt.id ? ' (task ' + attempt.id + ' created; delete it from the driver\'s list)' : '') +
+          '. Tell me this route and I will make it the dispatch address.');
+      } else {
+        Logger.log('The gateway KNOWS ' + routes[i] + ' (HTTP ' + attempt.code + ', not 404), so the route exists and the request body or credentials need adjusting. Its message: ' +
+          describeFastFieldError_(attempt));
+      }
+      return routes[i];
+    }
+  }
+  Logger.log('Every route was a 404. Compare with the dispatch operation in the FastField developer portal (its method and URL template).');
+  return null;
 }
 
 function firstString_(values) {

@@ -2,6 +2,7 @@
 // webhook (receipt PDF link), plus the 31 -> 33 column self-migration. Run: npm test
 'use strict';
 
+const vm = require('node:vm');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { API_SECRET, makeContext, post, rowObj, dataRowCount } = require('./support/gas-mock');
@@ -14,7 +15,9 @@ const PASSWORD = 'p@ss:wörd/9!';
 const TOKEN = '0f1e2d3c4b5a69788796a5b4c3d2e1f0';
 const WON = '1 - Won / Booked';
 const LOST = '0 - Lost / Declined';
-const FF_URL = 'https://api.fastfieldforms.com/services/v3/dispatches';
+const FF_URL = 'https://api.fastfieldforms.com/services/v3/dispatch';
+const FORM_DISPATCH_URL = 'https://api.fastfieldforms.com/services/v3/forms/98765/dispatch';
+const TASKS_URL = 'https://api.fastfieldforms.com/services/v3/tasks';
 const FORMS_URL = 'https://api.fastfieldforms.com/services/v3/forms';
 const AUTH_URL = 'https://api.fastfieldforms.com/services/v3/authenticate';
 const SESSION_KEY = 'fastfield_session_token';
@@ -772,6 +775,94 @@ test('testFastFieldDispatch: an unreadable forms reply continues to the dispatch
   env.ctx.testFastFieldDispatch();
   assert.equal(dispatches(env).length, 1);
   assert.match(logText(env), /could not be checked/);
+});
+
+test('dispatch: the address is the singular /v3/dispatch, built from the v3 base', () => {
+  const config = vm.runInContext('CONFIG', makeContext().ctx);
+  assert.equal(config.FASTFIELD_DISPATCH_URL, 'https://api.fastfieldforms.com/services/v3/dispatch');
+  assert.equal(config.FASTFIELD_FORMS_URL, 'https://api.fastfieldforms.com/services/v3/forms');
+  assert.equal(config.FASTFIELD_AUTH_URL, 'https://api.fastfieldforms.com/services/v3/authenticate');
+  assert.equal(config.FASTFIELD_TASKS_URL, 'https://api.fastfieldforms.com/services/v3/tasks');
+  const plural = configure(makeContext());
+  plural.ctx.dispatchToFastField_({ call_id: 'J', outcome: 1 });
+  assert.ok(plural.fetchCalls.every((c) => !c.url.endsWith('/dispatches')), 'the plural path is never used');
+  assert.equal(dispatches(plural).length, 1);
+});
+
+test('route discovery: a 404 on /dispatch tries /forms/{id}/dispatch, then /tasks, logging each status and body', () => {
+  const env = configure(makeContext());
+  const body404 = '{"statusCode":404,"message":"Resource not found"}';
+  env.fetcher.respond = (url) => {
+    if (url === FORMS_URL) return { code: 200, body: JSON.stringify(FORMS) };
+    return { code: 404, body: body404 };
+  };
+  env.ctx.testFastFieldDispatch();
+  const posts = env.fetchCalls.filter((c) => c.options.method === 'post' && c.url !== AUTH_URL).map((c) => c.url);
+  assert.deepEqual(posts, [FF_URL, FORM_DISPATCH_URL, TASKS_URL], 'primary first, then the two alternatives in order');
+  const log = logText(env);
+  assert.match(log, /HTTP status: 404/);
+  assert.match(log, /POST https:\/\/api\.fastfieldforms\.com\/services\/v3\/forms\/98765\/dispatch: HTTP 404 \{"statusCode":404,"message":"Resource not found"\}/);
+  assert.match(log, /POST https:\/\/api\.fastfieldforms\.com\/services\/v3\/tasks: HTTP 404 \{"statusCode":404/);
+  assert.match(log, /Every route was a 404/);
+  // the alternatives carry the same session, keys and body
+  const [, , forms2, tasks] = env.fetchCalls.slice(-4);
+  for (const call of [forms2, tasks]) {
+    assertSessionHeaders(call);
+    assert.equal(JSON.parse(call.options.payload).mergeFields.alpha_1, 'TEST-DISPATCH-001');
+  }
+  noSecrets(env);
+});
+
+test('route discovery: stops at the first route that is not a 404, so no extra test task is created', () => {
+  const accepted = configure(makeContext());
+  accepted.fetcher.respond = (url) => {
+    if (url === FORMS_URL) return { code: 200, body: JSON.stringify(FORMS) };
+    if (url === FORM_DISPATCH_URL) return { code: 201, body: JSON.stringify({ id: 'T-31' }) };
+    return { code: 404, body: '{"message":"Resource not found"}' };
+  };
+  accepted.ctx.testFastFieldDispatch();
+  assert.ok(!accepted.fetchCalls.some((c) => c.url === TASKS_URL), 'did not go on to /tasks');
+  assert.match(logText(accepted), /gateway ACCEPTED https:\/\/api\.fastfieldforms\.com\/services\/v3\/forms\/98765\/dispatch \(task T-31 created/);
+
+  const known = configure(makeContext());
+  known.fetcher.respond = (url) => {
+    if (url === FORMS_URL) return { code: 200, body: JSON.stringify(FORMS) };
+    if (url === FORM_DISPATCH_URL) return { code: 404, body: '{"message":"Resource not found"}' };
+    if (url === TASKS_URL) return { code: 422, body: '{"message":"users is required"}' };
+    return { code: 404, body: '{"message":"Resource not found"}' };
+  };
+  known.ctx.testFastFieldDispatch();
+  assert.match(logText(known), /gateway KNOWS https:\/\/api\.fastfieldforms\.com\/services\/v3\/tasks \(HTTP 422, not 404\)[\s\S]*users is required/);
+});
+
+test('route discovery: runs only after a 404 on the primary route, never on other answers', () => {
+  for (const code of [201, 400, 401, 403, 500]) {
+    const env = configure(makeContext());
+    fastFieldServer(env, { dispatch: { code, body: '{"message":"x"}' } });
+    env.ctx.testFastFieldDispatch();
+    assert.ok(!env.fetchCalls.some((c) => c.url === FORM_DISPATCH_URL || c.url === TASKS_URL), String(code));
+  }
+});
+
+test('route discovery: a network failure on an alternative is logged and the next one is tried', () => {
+  const env = configure(makeContext());
+  env.fetcher.respond = (url) => {
+    if (url === FORMS_URL) return { code: 200, body: JSON.stringify(FORMS) };
+    if (url === FORM_DISPATCH_URL) return new Error('socket closed');
+    return { code: 404, body: '{}' };
+  };
+  env.ctx.testFastFieldDispatch();
+  assert.match(logText(env), /forms\/98765\/dispatch: request failed \(socket closed\)/);
+  assert.ok(env.fetchCalls.some((c) => c.url === TASKS_URL));
+});
+
+test('route discovery: a real app sync never probes other routes', () => {
+  const env = configure(makeContext());
+  env.fetcher.respond = () => ({ code: 404, body: '{"message":"Resource not found"}' });
+  const res = post(env, appPayload());
+  assert.equal(res.ok, true);
+  assert.deepEqual(env.fetchCalls.filter((c) => c.url !== AUTH_URL).map((c) => c.url), [FF_URL]);
+  assert.equal(rowObj(env, res.row).FastField_Task_ID, '');
 });
 
 test('testFastFieldDispatch: a 400 or 422 on the dispatch logs FastField\'s exact validation message', () => {
