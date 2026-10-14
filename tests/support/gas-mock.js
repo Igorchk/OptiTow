@@ -88,7 +88,15 @@ function makeContext(seed) {
   // hook for a test to refuse a particular wait.
   const lock = { held: false, waits: [], deny: () => false };
   const logger = [];
-  const fetcher = { respond: () => ({ code: 200, body: JSON.stringify({ dispatchId: 'FF-1001' }) }) };
+  const fetcher = {
+    respond: () => ({ code: 200, body: JSON.stringify({ dispatchId: 'FF-1001' }) }),
+    // FastField's sign-in (POST .../v3/authenticate) is answered separately, so a test that changes
+    // what the dispatch returns does not also change whether signing in works.
+    authRespond: () => ({
+      code: 200,
+      body: JSON.stringify({ sessionToken: '0f1e2d3c4b5a69788796a5b4c3d2e1f0', sessionExpiration: new Date(Date.now() + 24 * 3600e3).toISOString() }),
+    }),
+  };
   const geocodeCalls = [];
   const ctx = {
     console: { log() {}, warn: (...a) => logs.warn.push(a.join(' ')), error: (...a) => logs.error.push(a.join(' ')) },
@@ -112,7 +120,7 @@ function makeContext(seed) {
     UrlFetchApp: {
       fetch: (url, options) => {
         fetchCalls.push({ url, options, lockHeld: lock.held });
-        const answer = fetcher.respond(url, options);
+        const answer = String(url).endsWith('/v3/authenticate') ? fetcher.authRespond(url, options) : fetcher.respond(url, options);
         if (answer instanceof Error) throw answer;
         return {
           getResponseCode: () => answer.code,
@@ -142,6 +150,7 @@ function makeContext(seed) {
       getUuid: () => crypto.randomUUID(),
       DigestAlgorithm: { MD5: 'md5' },
       computeDigest: (alg, s) => [...crypto.createHash(alg).update(s).digest()],
+      base64Encode: (s) => Buffer.from(s, 'utf8').toString('base64'),
       base64EncodeWebSafe: (bytes) => Buffer.from(bytes).toString('base64url'),
     },
     Maps: {
