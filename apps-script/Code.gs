@@ -1253,6 +1253,30 @@ function fastFieldProblem_(callData) {
   return FASTFIELD_PROBLEMS.BREAK_DOWN;
 }
 
+// Year and ZIP default to FastField Numeric fields, which display with thousands commas (2,022 and
+// 95,678) and cannot be set otherwise. If the form's fields are swapped for Text or Formatted Input
+// ones, these Script Properties name the new keys; a key that does not start with "numeric" is sent
+// as text.
+const FASTFIELD_NUMBER_FIELDS = Object.freeze({
+  year: { property: 'FASTFIELD_YEAR_FIELD', key: 'numeric_1' },
+  pickupZip: { property: 'FASTFIELD_PICKUP_ZIP_FIELD', key: 'numeric_2' },
+  dropoffZip: { property: 'FASTFIELD_DROPOFF_ZIP_FIELD', key: 'numeric_3' },
+});
+
+/** The merge field key to use for 'year', 'pickupZip' or 'dropoffZip': the property if set, else the default. */
+function fastFieldNumberKey_(name) {
+  const field = FASTFIELD_NUMBER_FIELDS[name];
+  const configured = getScriptProperty_(field.property);
+  return /^[A-Za-z][A-Za-z0-9_]*$/.test(configured) ? configured : field.key;
+}
+
+/** A year or ZIP for `key`: a number for a numeric field, else its digits as text. '' / null when there is none. */
+function fastFieldNumberValue_(key, value, emptyNumeric) {
+  const isNumeric = /^numeric/i.test(key);
+  if (value === null || value === undefined || value === '') return isNumeric ? emptyNumeric : '';
+  return isNumeric ? Number(value) : String(value);
+}
+
 /** The merge fields that pre-fill the job, by FastField field key. */
 function fastFieldMergeFields_(callData) {
   const notes = callData.notes_comments === undefined || callData.notes_comments === null
@@ -1264,18 +1288,22 @@ function fastFieldMergeFields_(callData) {
     alpha_1: callData.call_id,
     multiline_1: notes,
     formattedinput_1: text(callData.customer_phone),
-    numeric_1: Number(callData.vehicle_year) || null,
     alpha_3: text(callData.vehicle_make),
     alpha_4: text(callData.vehicle_model),
     alpha_9: pickup.street,
     alpha_10: pickup.city,
     alpha_11: pickup.state,
   };
-  if (pickup.zip !== null) fields.numeric_2 = pickup.zip;
+  const yearKey = fastFieldNumberKey_('year');
+  const year = Number(callData.vehicle_year) || null;
+  fields[yearKey] = fastFieldNumberValue_(yearKey, year, null);
+  const pickupZipKey = fastFieldNumberKey_('pickupZip');
+  const dropoffZipKey = fastFieldNumberKey_('dropoffZip');
+  if (pickup.zip !== null) fields[pickupZipKey] = fastFieldNumberValue_(pickupZipKey, pickup.zip);
   fields.alpha_13 = dropoff.street;
   fields.alpha_14 = dropoff.city;
   fields.alpha_15 = dropoff.state;
-  if (dropoff.zip !== null) fields.numeric_3 = dropoff.zip;
+  if (dropoff.zip !== null) fields[dropoffZipKey] = fastFieldNumberValue_(dropoffZipKey, dropoff.zip);
   fields.listpicker_1 = fastFieldProblem_(callData);
   fields.listpicker_2 = text(callData.service_requested);
   fields.numeric_4 = Number(callData.quoted_price) || 0;

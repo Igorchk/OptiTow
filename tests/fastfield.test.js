@@ -1674,3 +1674,49 @@ test('dispatch fields: the quote goes to numeric_4 as a number and the notes sta
   assert.equal(sentFields({ notes_comments: null }).multiline_1, '');
   assert.ok(!JSON.stringify(sentFields({ quoted_price: 285, notes_comments: 'x' })).includes('Quoted'));
 });
+
+// ---- year / ZIP field keys can be switched from Numeric to Text fields ----
+
+const withProps = (props, call) => {
+  const env = configure(makeContext());
+  Object.assign(env.props, props);
+  env.ctx.dispatchToFastField_(Object.assign({ call_id: 'J', outcome: WON, vehicle_year: 2022,
+    pickup_address: '965 Riverside Ave, Roseville, CA 95678', dropoff_address: '123 Main St, Sacramento, CA 95814' }, call));
+  return merged(JSON.parse(dispatches(env)[0].options.payload));
+};
+
+test('field keys: year and ZIPs default to numeric_1, numeric_2 and numeric_3 and are numbers', () => {
+  const f = withProps({});
+  assert.deepEqual([f.numeric_1, f.numeric_2, f.numeric_3], [2022, 95678, 95814]);
+});
+
+test('field keys: FASTFIELD_YEAR_FIELD and the ZIP properties move them to text fields, sent as text', () => {
+  const f = withProps({ FASTFIELD_YEAR_FIELD: 'alpha_20', FASTFIELD_PICKUP_ZIP_FIELD: 'formattedinput_2', FASTFIELD_DROPOFF_ZIP_FIELD: ' "alpha_21" ' });
+  assert.equal(f.alpha_20, '2022');
+  assert.equal(f.formattedinput_2, '95678');
+  assert.equal(f.alpha_21, '95814');
+  assert.ok(!('numeric_1' in f) && !('numeric_2' in f) && !('numeric_3' in f), 'the numeric keys are no longer sent');
+});
+
+test('field keys: a numeric replacement key is still sent as a number, and each can be switched alone', () => {
+  const f = withProps({ FASTFIELD_PICKUP_ZIP_FIELD: 'numeric_9' });
+  assert.equal(f.numeric_9, 95678);
+  assert.ok(!('numeric_2' in f));
+  assert.equal(f.numeric_3, 95814);
+  assert.equal(f.numeric_1, 2022);
+});
+
+test('field keys: a missing year or ZIP is null / absent for numeric keys and empty text / absent for text keys', () => {
+  const none = withProps({}, { vehicle_year: undefined, pickup_address: 'I-80 EB past Exit 98' });
+  assert.equal(none.numeric_1, null);
+  assert.ok(!('numeric_2' in none));
+  const text = withProps({ FASTFIELD_YEAR_FIELD: 'alpha_20', FASTFIELD_PICKUP_ZIP_FIELD: 'alpha_22' }, { vehicle_year: undefined, pickup_address: 'I-80 EB past Exit 98' });
+  assert.equal(text.alpha_20, '');
+  assert.ok(!('alpha_22' in text), 'no ZIP, no key');
+});
+
+test('field keys: a malformed property value is ignored in favour of the default', () => {
+  const f = withProps({ FASTFIELD_YEAR_FIELD: 'not a key!', FASTFIELD_PICKUP_ZIP_FIELD: '' });
+  assert.equal(f.numeric_1, 2022);
+  assert.equal(f.numeric_2, 95678);
+});
