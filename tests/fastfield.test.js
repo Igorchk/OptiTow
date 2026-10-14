@@ -6,6 +6,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { API_SECRET, makeContext, post, rowObj, dataRowCount } = require('./support/gas-mock');
 
+// The Azure gateway's 32-character subscription key, and the longer FastField user token.
+const SUB = '0123456789abcdef0123456789abcdef';
 const WON = '1 - Won / Booked';
 const LOST = '0 - Lost / Declined';
 const FF_URL = 'https://api.fastfieldforms.com/services/v3/dispatches';
@@ -14,6 +16,7 @@ const PDF = 'https://reports.fastfieldforms.com/receipts/abc123.pdf';
 
 function configure(env) {
   Object.assign(env.props, {
+    FASTFIELD_SUBSCRIPTION_KEY: SUB,
     FASTFIELD_API_KEY: 'ff-key-123',
     FASTFIELD_FORM_ID: '98765',
     FASTFIELD_USER_ID: 'driver@recoverytowing.example',
@@ -40,12 +43,12 @@ function appPayload(overrides = {}) {
 }
 
 /** Every request to FastField must carry the key in each header form the gateway may read. */
-function assertFastFieldHeaders(call, key = 'ff-key-123') {
+function assertFastFieldHeaders(call, { sub = SUB, api = 'ff-key-123' } = {}) {
   const h = call.options.headers;
-  assert.equal(h['Ocp-Apim-Subscription-Key'], key);
-  assert.equal(h.Authorization, 'Bearer ' + key);
-  assert.equal(h['x-api-key'], key);
-  assert.equal(h['fastfield-api-key'], key);
+  assert.equal(h['Ocp-Apim-Subscription-Key'], sub, 'the gateway gets the subscription key');
+  assert.equal(h['x-api-key'], sub);
+  assert.equal(h.Authorization, 'Bearer ' + api, 'FastField gets the user token as the Bearer');
+  assert.equal(h['fastfield-api-key'], api);
   assert.equal(h['Content-Type'], 'application/json');
   assert.equal(h.Accept, 'application/json');
 }
@@ -152,8 +155,9 @@ test('dispatch: the API key is sent only in the header, never logged', () => {
   const env = configure(makeContext());
   env.fetcher.respond = () => ({ code: 500, body: 'oops' });
   env.ctx.dispatchToFastField_({ call_id: 'J', outcome: 1 });
-  assert.ok(!env.logs.error.concat(env.logs.warn).some((l) => l.includes('ff-key-123')));
+  assert.ok(!env.logs.error.concat(env.logs.warn).some((l) => l.includes('ff-key-123') || l.includes(SUB)));
   assert.ok(!env.fetchCalls[0].options.payload.includes('ff-key-123'));
+  assert.ok(!env.fetchCalls[0].options.payload.includes(SUB));
 });
 
 // --- the app sync path -------------------------------------------------------
@@ -358,7 +362,7 @@ test('testFastFieldDispatch: verifies the key and form, then sends a marked test
   assert.match(log, /HTTP status: 200[\s\S]*Form verified: Recovery Towing Service Form[\s\S]*HTTP status: 201/);
   assert.match(log, /X-Req/);
   assert.match(log, /T-55/);
-  assert.ok(!log.includes('ff-key-123'), 'the key is never logged');
+  assert.ok(!log.includes('ff-key-123') && !log.includes(SUB), 'no key is ever logged');
   assert.equal(JSON.stringify(env.sheet.data), before, 'the Call Log is untouched');
 });
 
@@ -384,13 +388,16 @@ test('testFastFieldDispatch: a form id that is not in the list shows the availab
   assert.match(log, /98765\s+Recovery Towing Service Form/);
 });
 
-test('testFastFieldDispatch: a rejected key stops at step 1 with a hint', () => {
+test('testFastFieldDispatch: a 401 that is not from the gateway is a rejected Bearer token and runs no placement probes', () => {
   const env = configure(makeContext());
-  fastFieldServer(env, { forms: { code: 401, body: '{"message":"Access denied"}' } });
+  fastFieldServer(env, { forms: { code: 401, body: '{"message":"Invalid or expired token"}' } });
   assert.equal(env.ctx.testFastFieldDispatch(), null);
-  assert.equal(env.fetchCalls.length, 5, 'the forms request, then four single-placement probes; never a dispatch');
-  assert.ok(env.fetchCalls.every((c) => c.url.startsWith(FORMS_URL)));
-  assert.match(env.logger.join('\n'), /HTTP status: 401[\s\S]*FASTFIELD_API_KEY[\s\S]*Access denied/);
+  assert.equal(env.fetchCalls.length, 1, 'only the forms request; never a dispatch');
+  const log = env.logger.join('\n');
+  assert.match(log, /HTTP status: 401/);
+  assert.match(log, /gateway let the subscription key through, but FastField rejected the BEARER TOKEN/);
+  assert.match(log, /FASTFIELD_API_KEY/);
+  assert.ok(!log.includes('Trying each way'));
 });
 
 test('testFastFieldDispatch: an unreadable forms reply continues to the dispatch with a note', () => {
@@ -429,16 +436,40 @@ test('testFastFieldDispatch: a missing setting and a network failure are explain
   assert.match(html.logger.join('\n'), /not JSON[\s\S]*bad gateway/);
 });
 
-test('headers: getFastFieldHeaders_ puts the key in every header form and asks for JSON', () => {
+test('headers: the subscription key and the user token go where each belongs', () => {
   const env = makeContext();
-  assert.deepEqual(JSON.parse(JSON.stringify(env.ctx.getFastFieldHeaders_('K'))), {
-    'Ocp-Apim-Subscription-Key': 'K',
-    Authorization: 'Bearer K',
-    'x-api-key': 'K',
-    'fastfield-api-key': 'K',
+  Object.assign(env.props, { FASTFIELD_SUBSCRIPTION_KEY: 'SUBKEY', FASTFIELD_API_KEY: 'USERTOKEN' });
+  assert.deepEqual(JSON.parse(JSON.stringify(env.ctx.getFastFieldHeaders_())), {
+    'Ocp-Apim-Subscription-Key': 'SUBKEY',
+    Authorization: 'Bearer USERTOKEN',
+    'fastfield-api-key': 'USERTOKEN',
+    'x-api-key': 'SUBKEY',
     'Content-Type': 'application/json',
     Accept: 'application/json',
   });
+});
+
+test('headers: without FASTFIELD_SUBSCRIPTION_KEY the user token is used for the gateway too', () => {
+  for (const missing of [undefined, '', '   ', ' "" ']) {
+    const env = makeContext();
+    Object.assign(env.props, { FASTFIELD_API_KEY: 'USERTOKEN' });
+    if (missing !== undefined) env.props.FASTFIELD_SUBSCRIPTION_KEY = missing;
+    const h = env.ctx.getFastFieldHeaders_();
+    assert.equal(h['Ocp-Apim-Subscription-Key'], 'USERTOKEN');
+    assert.equal(h['x-api-key'], 'USERTOKEN');
+    assert.equal(h.Authorization, 'Bearer USERTOKEN');
+  }
+  const env = configure(makeContext());
+  delete env.props.FASTFIELD_SUBSCRIPTION_KEY;
+  assert.equal(env.ctx.dispatchToFastField_({ call_id: 'J', outcome: 1 }), 'FF-1001');
+  assertFastFieldHeaders(env.fetchCalls[0], { sub: 'ff-key-123', api: 'ff-key-123' });
+});
+
+test('headers: the subscription key is optional for dispatch; the user token still is not', () => {
+  const env = configure(makeContext());
+  delete env.props.FASTFIELD_API_KEY;
+  assert.equal(env.ctx.dispatchToFastField_({ call_id: 'J', outcome: 1 }), null);
+  assert.equal(env.fetchCalls.length, 0);
 });
 
 test('headers: every request FastField receives carries the subscription key, including real dispatches', () => {
@@ -452,7 +483,7 @@ test('headers: every request FastField receives carries the subscription key, in
 
 test('testFastFieldDispatch: a 401 tries each way of sending the key on its own and reports the one that works', () => {
   const env = configure(makeContext());
-  env.fetcher.respond = (url, options) => (url.includes('subscription-key=ff-key-123')
+  env.fetcher.respond = (url) => (url.includes('subscription-key=' + SUB)
     ? { code: 200, body: JSON.stringify(FORMS) }
     : { code: 401, body: JSON.stringify({ statusCode: 401, message: 'Access denied due to missing subscription key.' }) });
   assert.equal(env.ctx.testFastFieldDispatch(), null);
@@ -461,14 +492,18 @@ test('testFastFieldDispatch: a 401 tries each way of sending the key on its own 
   assert.deepEqual(Object.keys(ocp.options.headers).filter((h) => h !== 'Accept'), ['Ocp-Apim-Subscription-Key']);
   assert.deepEqual(Object.keys(xapi.options.headers).filter((h) => h !== 'Accept'), ['x-api-key']);
   assert.deepEqual(Object.keys(bearer.options.headers).filter((h) => h !== 'Accept'), ['Authorization']);
-  assert.equal(query.url, FORMS_URL + '?subscription-key=ff-key-123');
+  assert.equal(query.url, FORMS_URL + '?subscription-key=' + SUB);
+  assert.equal(ocp.options.headers['Ocp-Apim-Subscription-Key'], SUB);
+  assert.equal(xapi.options.headers['x-api-key'], SUB);
+  assert.equal(bearer.options.headers.Authorization, 'Bearer ff-key-123');
   assert.deepEqual(Object.keys(query.options.headers), ['Accept'], 'the query probe sends the key only in the URL');
   const log = env.logger.join('\n');
   assert.match(log, /HTTP status: 401[\s\S]*missing subscription key/);
   assert.match(log, /Ocp-Apim-Subscription-Key header only: HTTP 401/);
   assert.match(log, /\?subscription-key= query parameter only: HTTP 200 \(accepted\)/);
   assert.match(log, /accepts the key via: \?subscription-key= query parameter only/);
-  assert.ok(!log.includes('ff-key-123'), 'neither the key nor the URL holding it is logged');
+  assert.ok(!log.includes('ff-key-123') && !log.includes(SUB), 'neither a key nor the URL holding one is logged');
+  assert.match(log, /Azure API Management \(the gateway\) rejected the SUBSCRIPTION KEY/);
 });
 
 test('testFastFieldDispatch: when no placement works it says the key value is the problem', () => {
@@ -478,9 +513,9 @@ test('testFastFieldDispatch: when no placement works it says the key value is th
   assert.equal(env.fetchCalls.length, 5);
   const log = env.logger.join('\n');
   assert.match(log, /No placement worked/);
-  assert.match(log, /whitespace and quotes are already removed/);
+  assert.match(log, /check FASTFIELD_SUBSCRIPTION_KEY/);
   assert.match(log, /invalid subscription key/);
-  assert.ok(!log.includes('ff-key-123'));
+  assert.ok(!log.includes('ff-key-123') && !log.includes(SUB));
 });
 
 test('testFastFieldDispatch: a non-401 failure does not run the query-parameter check', () => {
@@ -512,6 +547,7 @@ test('sanitize: trims whitespace, newlines, tabs and surrounding quotes, and not
 test('sanitize: a pasted FastField key, form id and user are cleaned before use', () => {
   const env = makeContext();
   Object.assign(env.props, {
+    FASTFIELD_SUBSCRIPTION_KEY: ' \'' + SUB + '\'\n',
     FASTFIELD_API_KEY: '  "ff-key-123"\n',
     FASTFIELD_FORM_ID: " '98765' ",
     FASTFIELD_USER_ID: '\tdriver@recoverytowing.example \n',
@@ -543,22 +579,52 @@ test('sanitize: API_SECRET with stray whitespace or quotes in Script Properties 
   assert.equal(post(env, { token: API_SECRET, call_id: 'X1', customer_phone: '916-555-0150' }).code, 'SERVER_MISCONFIGURED');
 });
 
-test('testFastFieldDispatch: logs a safe summary of the key before any request', () => {
+test('testFastFieldDispatch: logs a safe summary of both keys before any request', () => {
   const env = configure(makeContext());
-  const key = '0123456789abcdef0123456789abcdef';
-  env.props.FASTFIELD_API_KEY = ' "' + key + '"\n';
+  const api = 'Z'.repeat(35) + 'q'.repeat(35);
+  env.props.FASTFIELD_SUBSCRIPTION_KEY = ' "' + SUB + '"\n';
+  env.props.FASTFIELD_API_KEY = api;
   fastFieldServer(env);
   env.ctx.testFastFieldDispatch();
   const log = env.logger.join('\n');
-  assert.ok(log.indexOf('Key Length') < log.indexOf('Step 1 of 2'), 'summary comes first');
-  assert.match(log, /Key Length: 32/);
-  assert.match(log, /Key Masked: 0123\.\.\.cdef/);
-  assert.match(log, /Is 32-character Hexadecimal: true/);
-  assert.match(log, /Contains Whitespace Before Trim: true \(removed before sending\)/);
-  assert.match(log, /Had Surrounding Quotes: true/);
-  assert.match(log, /Contains Whitespace Inside: false/);
-  assert.ok(!log.includes(key), 'the full key is never logged');
-  assert.equal(env.fetchCalls[0].options.headers['Ocp-Apim-Subscription-Key'], key, 'the cleaned key is what is sent');
+  assert.ok(log.indexOf('FASTFIELD_SUBSCRIPTION_KEY') < log.indexOf('Step 1 of 2'), 'summary comes first');
+  const [subPart, apiPart] = log.split('FASTFIELD_API_KEY (FastField user token');
+  assert.match(subPart, /FASTFIELD_SUBSCRIPTION_KEY \(Azure gateway key\): present/);
+  assert.match(subPart, /Key Length: 32/);
+  assert.match(subPart, /Key Masked: 0123\.\.\.cdef/);
+  assert.match(subPart, /Is 32-character Hexadecimal: true/);
+  assert.match(subPart, /Contains Whitespace Before Trim: true \(removed before sending\)/);
+  assert.match(subPart, /Had Surrounding Quotes: true/);
+  assert.match(apiPart, /: present/);
+  assert.match(apiPart, /Key Length: 70/);
+  assert.match(apiPart, /Key Masked: ZZZZ\.\.\.qqqq/);
+  assert.match(apiPart, /Is 32-character Hexadecimal: false \(format: alphanumeric\)/);
+  assert.ok(!log.includes(SUB) && !log.includes(api), 'neither key is ever logged in full');
+  assert.equal(env.fetchCalls[0].options.headers['Ocp-Apim-Subscription-Key'], SUB, 'the cleaned key is what is sent');
+  assert.equal(env.fetchCalls[0].options.headers.Authorization, 'Bearer ' + api);
+});
+
+test('testFastFieldDispatch: says so when the subscription key is missing, and warns on an odd format', () => {
+  const missing = configure(makeContext());
+  delete missing.props.FASTFIELD_SUBSCRIPTION_KEY;
+  fastFieldServer(missing);
+  missing.ctx.testFastFieldDispatch();
+  assert.match(missing.logger.join('\n'), /FASTFIELD_SUBSCRIPTION_KEY \(Azure gateway key\): MISSING \(not set: FASTFIELD_API_KEY will be used/);
+
+  const odd = configure(makeContext());
+  odd.props.FASTFIELD_SUBSCRIPTION_KEY = 'not-a-hex-key-at-all-but-long-enough';
+  fastFieldServer(odd);
+  odd.ctx.testFastFieldDispatch();
+  assert.match(odd.logger.join('\n'), /normally 32 hexadecimal characters/);
+});
+
+test('testFastFieldDispatch: a cleared gateway lists the forms found, then sends the task', () => {
+  const env = configure(makeContext());
+  fastFieldServer(env);
+  env.ctx.testFastFieldDispatch();
+  const log = env.logger.join('\n');
+  assert.match(log, /Gateway cleared & forms verified: Inspection, Recovery Towing Service Form/);
+  assert.match(log, /HTTP status: 201[\s\S]*OK\. FastField created task T-55/);
 });
 
 test('testFastFieldDispatch: classifies other key formats, flags inner whitespace, and masks a short key', () => {
