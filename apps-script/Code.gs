@@ -1785,11 +1785,6 @@ function tryFastFieldRecipientFormats_(config, sessionToken, testCall, found) {
     Object.keys(extra).forEach(function (k) { body[k] = extra[k]; });
     return body;
   };
-  const pascal = function (extra) {
-    const body = { FormId: formId, MergeFields: fields };
-    Object.keys(extra).forEach(function (k) { body[k] = extra[k]; });
-    return body;
-  };
   if (userId !== null) {
     add('users: [user id ' + found.id + ']', buildFastFieldPayload_(testCall, formId, { field: 'users', value: found.id }), { field: 'users', value: found.id });
     add('userIds: [user id ' + found.id + ']', buildFastFieldPayload_(testCall, formId, { field: 'userIds', value: found.id }), { field: 'userIds', value: found.id });
@@ -1821,11 +1816,6 @@ function tryFastFieldRecipientFormats_(config, sessionToken, testCall, found) {
   }
   add('recipients: [{email}]', base({ recipients: [{ email: email }] }));
   add('recipients: [{email, isAnonymousDispatch:false}]', base({ recipients: [{ email: email, isAnonymousDispatch: false }] }));
-  // D: PascalCase, as a .NET backend may bind it
-  if (userId !== null) {
-    add('PascalCase FormId/Users/MergeFields: [user id]', pascal({ Users: [userId] }));
-    add('PascalCase FormId/AssignedUserId/MergeFields: user id', pascal({ AssignedUserId: userId }));
-  }
   // FastField read recipients: [{userId}] and [{email}] (past "recipient not found") and then asked for
   // a name, so these send one, under the keys it might use.
   if (userId !== null) add('recipients: [{userId}] + name', base({ recipients: [{ userId: userId }] }), { field: 'recipients', value: found.id });
@@ -1835,6 +1825,15 @@ function tryFastFieldRecipientFormats_(config, sessionToken, testCall, found) {
     add('recipients: [{userId}] + title', base({ title: name, recipients: [{ userId: userId }] }));
     add('recipients: [{userId}] + Name', base({ Name: name, recipients: [{ userId: userId }] }));
   }
+  // The server then failed reading mergeFields as an object ("JProperty does not contain fieldKey"),
+  // so these send it as a list of { fieldKey, <valueKey> } entries.
+  const listed = function (valueKey) {
+    return Object.keys(fields).map(function (k) { const e = { fieldKey: k }; e[valueKey] = fields[k]; return e; });
+  };
+  ['value', 'fieldValue'].forEach(function (valueKey) {
+    if (userId !== null) add('recipients: [{userId}] + mergeFields list {fieldKey, ' + valueKey + '}', { formId: formId, name: name, mergeFields: listed(valueKey), recipients: [{ userId: userId }] });
+    add('recipients: [{email}] + mergeFields list {fieldKey, ' + valueKey + '}', { formId: formId, name: name, mergeFields: listed(valueKey), recipients: [{ email: email }] });
+  });
   let closest = null;
   const seen = {};
   seen[first.field + ': ' + (first.field === 'userEmail' ? '<email>' : '[' + (first.value === email ? '<email>' : 'user id ' + first.value) + ']')] = true;

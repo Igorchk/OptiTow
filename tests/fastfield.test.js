@@ -1393,7 +1393,7 @@ test('recipient matrix: every candidate shape is tried in order, with the same m
   fastFieldServer(env, { dispatch: NO_RECIPIENT });
   env.ctx.testFastFieldDispatch();
   const all = bodies(env);
-  assert.equal(all.length, 28, 'the first send plus 27 other ways');
+  assert.equal(all.length, 30, 'the first send plus 29 other ways');
   const shape = (b) => {
     const copy = JSON.parse(JSON.stringify(b));
     delete copy.mergeFields; delete copy.MergeFields; delete copy.autoCreateUsers; delete copy.name;
@@ -1417,15 +1417,22 @@ test('recipient matrix: every candidate shape is tried in order, with the same m
     { formId: 98765, isAnonymousDispatch: false, recipients: [5002] },
     { formId: 98765, recipients: [{ email: E }] },
     { formId: 98765, recipients: [{ email: E, isAnonymousDispatch: false }] },
-    { FormId: 98765, Users: [5002] },
-    { FormId: 98765, AssignedUserId: 5002 },
     { formId: 98765, recipients: [{ userId: 5002 }] },
     { formId: 98765, recipients: [{ email: E }] },
     { formId: 98765, dispatchName: 'Tow - 2022 Honda Civic - TEST-DISPATCH-001', recipients: [{ userId: 5002 }] },
     { formId: 98765, title: 'Tow - 2022 Honda Civic - TEST-DISPATCH-001', recipients: [{ userId: 5002 }] },
     { formId: 98765, Name: 'Tow - 2022 Honda Civic - TEST-DISPATCH-001', recipients: [{ userId: 5002 }] },
+    { formId: 98765, recipients: [{ userId: 5002 }] },
+    { formId: 98765, recipients: [{ email: E }] },
+    { formId: 98765, recipients: [{ userId: 5002 }] },
+    { formId: 98765, recipients: [{ email: E }] },
   ]);
-  all.slice(5).forEach((b) => assert.equal((b.mergeFields || b.MergeFields).alpha_1, 'TEST-DISPATCH-001'));
+  all.slice(5, 26).forEach((b) => assert.equal(b.mergeFields.alpha_1, 'TEST-DISPATCH-001'));
+  // the last four send mergeFields as a list of { fieldKey, value | fieldValue }
+  const listed = all.slice(26);
+  assert.deepEqual(listed.map((b) => Object.keys(b.mergeFields[0])), [['fieldKey', 'value'], ['fieldKey', 'value'], ['fieldKey', 'fieldValue'], ['fieldKey', 'fieldValue']]);
+  assert.deepEqual(listed[0].mergeFields.find((e) => e.fieldKey === 'alpha_3'), { fieldKey: 'alpha_3', value: 'Honda' });
+  assert.equal(listed[0].mergeFields.length, 9);
   all.forEach((b, i) => assertSessionHeaders(dispatches(env)[i]));
   assert.match(logText(env), /No way of naming the recipient was accepted/);
   noSecrets(env);
@@ -1523,7 +1530,7 @@ test('recipient matrix: a 429 is waited out and retried, never taken for an acce
   assert.deepEqual([...env.sleeps], [36000, 36000]);
   assert.ok(!/ACCEPTED|different answer/.test(logText(env)));
   assert.match(logText(env), /rate limited \(HTTP 429\); waiting 36 s/);
-  assert.equal(dispatches(env).length, 30, '28 shapes, plus the 2 repeated');
+  assert.equal(dispatches(env).length, 32, '30 shapes, plus the 2 repeated');
 
   const stuck = configure(makeContext());
   stuck.fetcher.respond = (url) => (url === FORMS_URL ? { code: 200, body: JSON.stringify(FORMS) }
