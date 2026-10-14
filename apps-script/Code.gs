@@ -1215,23 +1215,71 @@ function fastFieldDispatchName_(callData) {
   return ['Tow', car, callData.call_id].filter(Boolean).join(' - ');
 }
 
+/**
+ * Splits a US address such as "965 Riverside Ave, Roseville, CA 95678" into { street, city, state,
+ * zip }. The city is the last comma-separated part before the state, the state a 2-letter code
+ * (upper-cased) and the ZIP a number (a ZIP+4 keeps its first 5 digits). A trailing country ("USA",
+ * "United States") is ignored. Anything that does not read that way, such as "I-80 EB past Exit 98"
+ * or a bare "Roseville, CA", goes whole into `street`, with city and state '' and zip null.
+ */
+function parseAddressComponents_(address) {
+  const full = address === undefined || address === null ? '' : String(address).trim();
+  const whole = { street: full, city: '', state: '', zip: null };
+  if (!full) return whole;
+  const cleaned = full.replace(/,?\s*(?:USA|U\.S\.A\.|United States(?: of America)?)\.?$/i, '').trim();
+  const m = /^(.+),\s*([^,]+?)\s*,\s*([A-Za-z]{2})\.?(?:\s+(\d{5})(?:-\d{4})?)?$/.exec(cleaned);
+  if (!m) return whole;
+  return {
+    street: m[1].trim(),
+    city: m[2].trim(),
+    state: m[3].toUpperCase(),
+    zip: m[4] ? Number(m[4]) : null,
+  };
+}
+
+// FastField's "Problem Reported" (listpicker_1) options.
+const FASTFIELD_PROBLEMS = Object.freeze({
+  ACCIDENT: 'Accident', FLAT_TIRE: 'Flat Tire', NO_KEY: 'No Key', RECOVERY: 'Recovery', BREAK_DOWN: 'Break Down',
+});
+
+/** The "Problem Reported" option for a call, from its vehicle condition and requested service. */
+function fastFieldProblem_(callData) {
+  const text = [callData.vehicle_condition, callData.service_requested]
+    .map(function (v) { return v === undefined || v === null ? '' : String(v); }).join(' ').toLowerCase();
+  if (/accident|collision/.test(text)) return FASTFIELD_PROBLEMS.ACCIDENT;
+  if (/flat tire|tire change|tire patch/.test(text)) return FASTFIELD_PROBLEMS.FLAT_TIRE;
+  if (/no key/.test(text)) return FASTFIELD_PROBLEMS.NO_KEY;
+  if (/winch|recovery|rollover/.test(text)) return FASTFIELD_PROBLEMS.RECOVERY;
+  return FASTFIELD_PROBLEMS.BREAK_DOWN;
+}
+
 /** The merge fields that pre-fill the job, by FastField field key. */
 function fastFieldMergeFields_(callData) {
   const notes = callData.notes_comments === undefined || callData.notes_comments === null
     ? '' : String(callData.notes_comments).trim();
-  const quote = callData.quoted_price ? 'Quoted: $' + callData.quoted_price : '';
   const text = function (v) { return v === undefined || v === null ? '' : v; };
-  return {
+  const pickup = parseAddressComponents_(callData.pickup_address);
+  const dropoff = parseAddressComponents_(callData.dropoff_address);
+  const fields = {
     alpha_1: callData.call_id,
-    multiline_1: [notes, quote].filter(Boolean).join(' | '),
+    multiline_1: notes,
     formattedinput_1: text(callData.customer_phone),
     numeric_1: Number(callData.vehicle_year) || null,
     alpha_3: text(callData.vehicle_make),
     alpha_4: text(callData.vehicle_model),
-    alpha_9: text(callData.pickup_address),
-    alpha_13: text(callData.dropoff_address),
-    listpicker_2: text(callData.service_requested),
+    alpha_9: pickup.street,
+    alpha_10: pickup.city,
+    alpha_11: pickup.state,
   };
+  if (pickup.zip !== null) fields.numeric_2 = pickup.zip;
+  fields.alpha_13 = dropoff.street;
+  fields.alpha_14 = dropoff.city;
+  fields.alpha_15 = dropoff.state;
+  if (dropoff.zip !== null) fields.numeric_3 = dropoff.zip;
+  fields.listpicker_1 = fastFieldProblem_(callData);
+  fields.listpicker_2 = text(callData.service_requested);
+  fields.numeric_4 = Number(callData.quoted_price) || 0;
+  return fields;
 }
 
 /** `mergeFields` as FastField's dispatch wants it: a list of { fieldKey, value }. */
@@ -1679,8 +1727,9 @@ function testFastFieldDispatch(options) {
     vehicle_year: 2022,
     vehicle_make: 'Honda',
     vehicle_model: 'Civic',
-    pickup_address: 'Roseville, CA',
-    dropoff_address: 'Sacramento, CA',
+    pickup_address: '965 Riverside Ave, Roseville, CA 95678',
+    dropoff_address: '123 Main St, Sacramento, CA 95814',
+    vehicle_condition: 'Flat Tire',
     quoted_price: 150,
     notes_comments: 'TEST DISPATCH, safe to delete',
   };
