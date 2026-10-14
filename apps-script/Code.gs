@@ -1795,11 +1795,24 @@ function tryFastFieldRecipientFormats_(config, sessionToken, testCall, found) {
   if (userId !== null) add('recipients: [user id]', base({ recipients: [userId] }));
   add('recipients: [<email>]', base({ recipients: [email] }));
   if (userId !== null) add('recipients: [{userId}]', base({ recipients: [{ userId: userId }] }));
+  // FastField answered a bare id in `recipients` with a 500 about `isAnonymousDispatch`: it reads each
+  // entry as an object, so these name the user inside one.
+  if (userId !== null) {
+    add('recipients: [{userId, isAnonymousDispatch:false}]', base({ recipients: [{ userId: userId, isAnonymousDispatch: false }] }));
+    add('recipients: [{id}]', base({ recipients: [{ id: userId }] }));
+    add('recipients: [{id, isAnonymousDispatch:false}]', base({ recipients: [{ id: userId, isAnonymousDispatch: false }] }));
+    add('recipients: [{id, type:"user"}]', base({ recipients: [{ id: userId, type: 'user' }] }));
+    add('recipients: [{userId, type:"user"}]', base({ recipients: [{ userId: userId, type: 'user' }] }));
+    add('isAnonymousDispatch:false + recipients: [user id]', base({ isAnonymousDispatch: false, recipients: [userId] }));
+  }
+  add('recipients: [{email}]', base({ recipients: [{ email: email }] }));
+  add('recipients: [{email, isAnonymousDispatch:false}]', base({ recipients: [{ email: email, isAnonymousDispatch: false }] }));
   // D: PascalCase, as a .NET backend may bind it
   if (userId !== null) {
     add('PascalCase FormId/Users/MergeFields: [user id]', pascal({ Users: [userId] }));
     add('PascalCase FormId/AssignedUserId/MergeFields: user id', pascal({ AssignedUserId: userId }));
   }
+  let closest = null;
   const seen = {};
   seen[first.field + ': ' + (first.field === 'userEmail' ? '<email>' : '[' + (first.value === email ? '<email>' : 'user id ' + first.value) + ']')] = true;
   diag_('FastField did not find the recipient. Trying ' + candidates.length + ' other ways to name them (stops at the first that is not "recipient not found"):');
@@ -1816,6 +1829,11 @@ function tryFastFieldRecipientFormats_(config, sessionToken, testCall, found) {
     if (isRecipientNotFound_(attempt)) continue;
     const shape = JSON.stringify(c.payload, function (k, v) { return k === 'mergeFields' || k === 'MergeFields' ? '<mergeFields>' : (v === email ? '<email>' : v); });
     const ok = attempt.code === 200 || attempt.code === 201;
+    if (attempt.code >= 500) {
+      diag_('  (HTTP ' + attempt.code + ' is a server error, not an acceptance; continuing.) Shape: ' + shape);
+      closest = { label: c.label, payload: c.payload, status: attempt.code };
+      continue;
+    }
     if (ok) {
       diag_('ACCEPTED with ' + c.label + (attempt.id ? ' (task ' + attempt.id + ' created; delete it from the driver\'s list)' : '') + '.');
     } else {
@@ -1834,7 +1852,8 @@ function tryFastFieldRecipientFormats_(config, sessionToken, testCall, found) {
     }
     return { label: c.label, payload: c.payload, status: attempt.code };
   }
-  diag_('No way of naming the recipient was accepted. Check the user list above: the recipient must be a user (or user group) in this FastField account.');
+  diag_('No way of naming the recipient was accepted. Check the user list above: the recipient must be a user (or user group) in this FastField account.' +
+    (closest ? ' The closest was ' + closest.label + ' (HTTP ' + closest.status + ').' : ''));
   return null;
 }
 

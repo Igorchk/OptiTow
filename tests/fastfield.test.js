@@ -1392,7 +1392,7 @@ test('recipient matrix: every candidate shape is tried in order, with the same m
   fastFieldServer(env, { dispatch: NO_RECIPIENT });
   env.ctx.testFastFieldDispatch();
   const all = bodies(env);
-  assert.equal(all.length, 15, 'the first send plus 14 other ways');
+  assert.equal(all.length, 23, 'the first send plus 22 other ways');
   const shape = (b) => {
     const copy = JSON.parse(JSON.stringify(b));
     delete copy.mergeFields; delete copy.MergeFields; delete copy.autoCreateUsers;
@@ -1408,6 +1408,14 @@ test('recipient matrix: every candidate shape is tried in order, with the same m
     { formId: 98765, recipients: [5002] },
     { formId: 98765, recipients: [E] },
     { formId: 98765, recipients: [{ userId: 5002 }] },
+    { formId: 98765, recipients: [{ userId: 5002, isAnonymousDispatch: false }] },
+    { formId: 98765, recipients: [{ id: 5002 }] },
+    { formId: 98765, recipients: [{ id: 5002, isAnonymousDispatch: false }] },
+    { formId: 98765, recipients: [{ id: 5002, type: 'user' }] },
+    { formId: 98765, recipients: [{ userId: 5002, type: 'user' }] },
+    { formId: 98765, isAnonymousDispatch: false, recipients: [5002] },
+    { formId: 98765, recipients: [{ email: E }] },
+    { formId: 98765, recipients: [{ email: E, isAnonymousDispatch: false }] },
     { FormId: 98765, Users: [5002] },
     { FormId: 98765, AssignedUserId: 5002 },
   ]);
@@ -1473,4 +1481,22 @@ test('production guard: a crash while dispatching a live call is swallowed and l
   const id = env.ctx.dispatchToFastField_({ call_id: 'C-1', outcome: 'Won', customer_phone: '1' });
   assert.equal(id, null);
   assert.ok(!env.logs.error.join('\n').includes(SUB));
+});
+
+test('recipient matrix: a 500 is not an acceptance, the next shapes are still tried, and the closest is named', () => {
+  const env = configure(makeContext());
+  env.props.FASTFIELD_USER_ID = 'driver@recoverytowing.example';
+  env.fetcher.respond = (url, options) => {
+    if (url === FORMS_URL) return { code: 200, body: JSON.stringify(FORMS) };
+    if (url === USERS_URL) return { code: 200, body: JSON.stringify(USERS) };
+    if (url === GROUPS_URL) return { code: 200, body: '[]' };
+    const b = JSON.parse(options.payload);
+    if (b.recipients && typeof b.recipients[0] === 'number') return { code: 500, body: '{"message":"Error creating dispatch","Code":500}' };
+    if (b.recipients && b.recipients[0] && b.recipients[0].id === 5002 && b.recipients[0].isAnonymousDispatch === false) return { code: 201, body: '{"dispatchId":"T-5"}' };
+    return NO_RECIPIENT;
+  };
+  env.ctx.testFastFieldDispatch();
+  assert.match(logText(env), /HTTP 500 is a server error, not an acceptance; continuing/);
+  assert.match(logText(env), /ACCEPTED with recipients: \[\{id, isAnonymousDispatch:false\}\]/);
+  assert.match(logText(env), /Winning payload schema: .*"recipients":\[\{"id":5002,"isAnonymousDispatch":false\}\]/);
 });
