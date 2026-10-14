@@ -5,7 +5,7 @@
 const vm = require('node:vm');
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { API_SECRET, makeContext, post, rowObj, dataRowCount } = require('./support/gas-mock');
+const { API_SECRET, makeContext, post, get, rowObj, dataRowCount } = require('./support/gas-mock');
 
 // The Azure gateway's 32-character subscription key, the account login, and the session token the
 // mock sign-in returns. All made up.
@@ -1128,6 +1128,114 @@ test('testFastFieldDispatch: classifies other key formats, flags inner whitespac
   assert.equal(info('ab\ncd', 'ab\ncd').hasInternalWhitespace, true);
   assert.equal(info('clean', 'clean').hadSurroundingWhitespace, false);
   assert.equal(info('clean', 'clean').hadSurroundingQuotes, false);
+});
+
+// --- the HTTP diagnostic route ----------------------------------------------
+
+const DIAG = { action: 'test_fastfield', token: API_SECRET };
+
+test('diagnostic route: a missing or wrong token is refused and nothing is sent to FastField', () => {
+  const env = configure(makeContext());
+  for (const query of [{ action: 'test_fastfield' }, { action: 'test_fastfield', token: 'nope' }, { action: 'test_fastfield', token: '' }]) {
+    assert.deepEqual(get(env, query), { ok: false, code: 'UNAUTHORIZED', error: 'UNAUTHORIZED' });
+  }
+  assert.equal(env.fetchCalls.length, 0);
+  const noSecret = configure(makeContext());
+  noSecret.props.API_SECRET = '';
+  assert.equal(get(noSecret, DIAG).ok, false, 'no configured secret never authorizes');
+  assert.equal(noSecret.fetchCalls.length, 0);
+});
+
+test('diagnostic route: a valid token runs the chain and returns the structured report', () => {
+  const env = configure(makeContext());
+  fastFieldServer(env, { dispatch: { code: 201, body: JSON.stringify({ dispatchId: 'T-55' }), headers: { 'X-Req': 'abc', 'Set-Cookie': ['ARRAffinity=SECRETCOOKIE; Domain=mmgatekeeper.azurewebsites.net'] } } });
+  const report = get(env, DIAG);
+  assert.equal(report.ok, true);
+  assert.equal(report.action, 'test_fastfield');
+  assert.equal(report.dispatched, true);
+  assert.deepEqual(report.result, { dispatchId: 'T-55' });
+  assert.deepEqual(report.requests.map((r) => [r.method, r.url, r.status]), [
+    ['POST', AUTH_URL, 200],
+    ['GET', FORMS_URL, 200],
+    ['GET', USERS_URL, 200],
+    ['POST', FF_URL, 201],
+  ]);
+  assert.deepEqual(report.requests[1].body, FORMS);
+  assert.deepEqual(report.requests[2].body, USERS, 'the users, for finding the recipient');
+  assert.deepEqual(report.requests[3].body, { dispatchId: 'T-55' });
+  assert.equal(report.requests[3].responseHeaders['X-Req'], 'abc');
+  assert.ok(Array.isArray(report.log) && report.log.length > 8);
+  assert.match(report.log.join('\n'), /Step 1 of 4[\s\S]*Step 2 of 4[\s\S]*Step 3 of 4[\s\S]*Step 4 of 4[\s\S]*OK\. FastField created task T-55/);
+  assert.match(report.log.join('\n'), /Found driver@recoverytowing\.example|No user has the email/);
+});
+
+test('diagnostic route: no secret appears anywhere in the report', () => {
+  const env = configure(makeContext());
+  fastFieldServer(env, { dispatch: { code: 201, body: '{"dispatchId":"T-1"}', headers: { 'Set-Cookie': ['ARRAffinity=SECRETCOOKIE'], Authorization: 'x' } } });
+  const raw = JSON.stringify(get(env, DIAG));
+  for (const secret of [PASSWORD, SUB, TOKEN, API_SECRET, 'SECRETCOOKIE']) assert.ok(!raw.includes(secret), 'leaked: ' + secret.slice(0, 6));
+  const report = JSON.parse(raw);
+  assert.equal(report.requests[0].body.sessionToken, '0f1e...e1f0', 'the session token is masked');
+  assert.equal(report.requests[3].responseHeaders['Set-Cookie'], '[hidden]');
+});
+
+test('diagnostic route: failures are reported, not thrown, and show the status and reply', () => {
+  const env = configure(makeContext());
+  fastFieldServer(env, { dispatch: NO_RECIPIENT });
+  const report = get(env, DIAG);
+  assert.equal(report.ok, true, 'the diagnostic ran');
+  assert.equal(report.dispatched, false);
+  const dispatchReplies = report.requests.filter((r) => r.url === FF_URL);
+  assert.ok(dispatchReplies.length > 1, 'the recipient formats were tried');
+  assert.equal(dispatchReplies[0].status, 404);
+  assert.deepEqual(dispatchReplies[0].body, { message: 'Recipient User or User Group not found', Code: 404 });
+  assert.match(report.log.join('\n'), /Recipient User or User Group not found/);
+
+  const signInFails = configure(makeContext());
+  signInFails.fetcher.authRespond = () => ({ code: 401, body: '{"message":"bad login"}' });
+  const failed = get(signInFails, DIAG);
+  assert.equal(failed.dispatched, false);
+  assert.deepEqual(failed.requests.map((r) => r.status), [401]);
+  assert.match(failed.log.join('\n'), /Sign-in failed: HTTP 401/);
+
+  const bare = get(makeContext(), DIAG);
+  assert.equal(bare.ok, true);
+  assert.deepEqual(bare.requests, []);
+  assert.match(bare.log.join('\n'), /Nothing was sent/);
+});
+
+test('diagnostic route: an unexpected exception becomes an error field, with secrets redacted', () => {
+  const env = configure(makeContext());
+  env.fetcher.respond = () => { throw new Error('boom ' + SUB); };
+  env.fetcher.authRespond = () => ({ code: 200, body: JSON.stringify({ sessionToken: TOKEN }) });
+  const report = get(env, DIAG);
+  assert.ok(!JSON.stringify(report).includes(SUB));
+  const crash = configure(makeContext());
+  crash.ctx.testFastFieldDispatch = () => { throw new Error('exploded with ' + PASSWORD); };
+  const crashed = get(crash, DIAG);
+  assert.equal(crashed.ok, false);
+  assert.match(crashed.error, /exploded with \*\*\*/);
+});
+
+test('diagnostic route: the report collector is cleared afterwards, and a second run starts fresh', () => {
+  const env = configure(makeContext());
+  fastFieldServer(env);
+  const first = get(env, DIAG);
+  const second = get(env, DIAG);
+  assert.equal(second.requests.length, first.requests.length, 'nothing carries over from the first run');
+  assert.equal(second.log.filter((l) => l.startsWith('Step 1 of 4')).length, 1);
+  // a run outside the route (as from the editor) collects nothing that a later report would pick up
+  env.ctx.testFastFieldDispatch();
+  const third = get(env, DIAG);
+  assert.equal(third.requests.length, first.requests.length);
+});
+
+test('diagnostic route: the health check and the location page are unchanged', () => {
+  const env = configure(makeContext());
+  assert.deepEqual(get(env, {}), { ok: true, service: 'optitow-middleware' });
+  assert.deepEqual(get(env, { action: 'something_else', token: API_SECRET }), { ok: true, service: 'optitow-middleware' });
+  assert.equal(env.fetchCalls.length, 0);
+  assert.equal(get(env, { loc: 'abcdefgh1234' }).kind, 'html');
 });
 
 // --- handleFastFieldWebhook_ -------------------------------------------------

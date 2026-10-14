@@ -13,7 +13,8 @@
  *                          page (customer's phone)       the landing page) is public but only
  *                                                        accepted for a token the app registered
  *
- * `doGet` answers a health check, or, with `?loc=<token>`, serves the customer's landing page.
+ * `doGet` answers a health check, or, with `?loc=<token>`, serves the customer's landing page, or, with
+ * `?action=test_fastfield&token=<API_SECRET>`, runs the FastField diagnostic and returns its report.
  *
  * Apps Script cannot read request headers or set HTTP status codes, so auth is a
  * pre-shared token in the payload/query and every response is HTTP 200 with a JSON
@@ -207,6 +208,7 @@ function doPost(e) {
 function doGet(e) {
   const params = (e && e.parameter) || {};
   if (params.loc !== undefined) return locationPage_(String(params.loc));
+  if (params.action === 'test_fastfield') return fastFieldTestRoute_(params);
   return json_({ ok: true, service: 'optitow-middleware' });
 }
 
@@ -1153,6 +1155,7 @@ function getFastFieldSessionToken_() {
     });
     const code = response.getResponseCode();
     const text = String(response.getContentText());
+    traceFastField_('POST', CONFIG.FASTFIELD_AUTH_URL, code, typeof response.getAllHeaders === 'function' ? response.getAllHeaders() : {}, text);
     let parsed = null;
     try { parsed = JSON.parse(text); } catch (_) { parsed = null; }
     const data = parsed && typeof parsed === 'object' ? (parsed.sessionToken ? parsed : (parsed.data || {})) : {};
@@ -1230,6 +1233,76 @@ function buildFastFieldPayload_(callData, formId, recipient) {
   return payload;
 }
 
+// While the diagnostic runs over HTTP (?action=test_fastfield), every FastField request and every
+// diagnostic line is also collected here so it can be returned as one JSON report. null otherwise.
+let fastFieldTrace_ = null;
+
+/** A diagnostic line: to the Apps Script log, and into the HTTP report when one is being built. */
+function diag_(message) {
+  Logger.log(message);
+  if (fastFieldTrace_) fastFieldTrace_.log.push(String(message));
+}
+
+/** A session token shown as its first and last 4 characters only. */
+function maskToken_(value) {
+  const t = String(value);
+  return t.length >= 16 ? t.slice(0, 4) + '...' + t.slice(-4) : '***';
+}
+
+/** Records one FastField request for the report: no query string, cookies and tokens hidden. */
+function traceFastField_(method, url, code, headers, text) {
+  if (!fastFieldTrace_) return;
+  let body;
+  try { body = JSON.parse(text); } catch (_) { body = String(text).slice(0, 2000); }
+  if (body && typeof body === 'object') {
+    body = JSON.parse(JSON.stringify(body));
+    if (body.sessionToken) body.sessionToken = maskToken_(body.sessionToken);
+    if (body.data && typeof body.data === 'object' && body.data.sessionToken) body.data.sessionToken = maskToken_(body.data.sessionToken);
+  }
+  fastFieldTrace_.requests.push({ method: method, url: String(url).split('?')[0], status: code, responseHeaders: redactHeaders_(headers), body: body });
+}
+
+/** Response headers with the ones that carry cookies, tokens or keys hidden, for logs and reports. */
+function redactHeaders_(headers) {
+  const shown = {};
+  Object.keys(headers || {}).forEach(function (name) {
+    shown[name] = /cookie|authorization|token|key/i.test(name) ? '[hidden]' : headers[name];
+  });
+  return shown;
+}
+
+/**
+ * GET ?action=test_fastfield&token=<API_SECRET>: runs testFastFieldDispatch and returns everything it
+ * did as JSON: the lines it logged, and each FastField request's status, response headers and parsed
+ * body. No secret appears in it (keys and the password are never logged; session tokens and cookies
+ * are masked). It sends a real TEST task to FastField when the chain gets that far.
+ */
+function fastFieldTestRoute_(params) {
+  const expected = getScriptProperty_('API_SECRET');
+  const token = String(params.token === undefined || params.token === null ? '' : params.token);
+  if (!expected || !token || !safeEqual_(token, expected)) {
+    return json_({ ok: false, code: 'UNAUTHORIZED', error: 'UNAUTHORIZED' });
+  }
+  fastFieldTrace_ = { requests: [], log: [] };
+  let result = null;
+  let error = '';
+  try {
+    result = testFastFieldDispatch();
+  } catch (err) {
+    error = redactSecrets_(String(err && err.message ? err.message : err),
+      [getScriptProperty_('FASTFIELD_SUBSCRIPTION_KEY'), getScriptProperty_('FASTFIELD_PASSWORD'), expected]);
+    console.error('test_fastfield failed: ' + error);
+  }
+  const trace = fastFieldTrace_;
+  fastFieldTrace_ = null;
+  const dispatched = trace.requests.some(function (r) {
+    return r.method === 'POST' && r.url === CONFIG.FASTFIELD_DISPATCH_URL && (r.status === 200 || r.status === 201);
+  });
+  const report = { ok: !error, action: 'test_fastfield', dispatched: dispatched, result: result, requests: trace.requests, log: trace.log };
+  if (error) report.error = error;
+  return json_(report);
+}
+
 /**
  * Sends a won call to FastField as a pre-filled task and reports everything about the answer:
  * { code, headers, text, parsed, id, error }. Returns null, after logging why, when nothing was
@@ -1280,6 +1353,7 @@ function postFastFieldDispatch_(subscriptionKey, sessionToken, payload, url) {
     result.code = response.getResponseCode();
     result.text = String(response.getContentText());
     if (typeof response.getAllHeaders === 'function') result.headers = response.getAllHeaders();
+    traceFastField_('POST', url || CONFIG.FASTFIELD_DISPATCH_URL, result.code, result.headers, result.text);
     try { result.parsed = JSON.parse(result.text); } catch (_) { result.parsed = null; }
     const found = result.parsed && (result.parsed.dispatchId || result.parsed.taskId || result.parsed.id);
     if (found) result.id = String(found);
@@ -1324,9 +1398,11 @@ function fastFieldGet_(url, headers) {
     result.code = response.getResponseCode();
     result.text = String(response.getContentText());
     if (typeof response.getAllHeaders === 'function') result.headers = response.getAllHeaders();
+    traceFastField_('GET', url, result.code, result.headers, result.text);
     try { result.parsed = JSON.parse(result.text); } catch (_) { result.parsed = null; }
   } catch (err) {
-    result.error = String(err && err.message ? err.message : err);
+    result.error = redactSecrets_(String(err && err.message ? err.message : err),
+      Object.keys(headers || {}).map(function (name) { return headers[name]; }));
   }
   return result;
 }
@@ -1403,7 +1479,7 @@ function probeFastFieldSignIn_(subscriptionKey, user, password) {
     { label: 'Ocp-Apim-Subscription-Key header only', url: url, headers: { 'Authorization': basicAuth, 'Ocp-Apim-Subscription-Key': subscriptionKey, 'Accept': 'application/json' } },
     { label: '?subscription-key= query parameter only', url: withQuery, headers: { 'Authorization': basicAuth, 'Accept': 'application/json' } },
   ];
-  Logger.log('The gateway says the sign-in has NO subscription key. Sending it a few ways to see which one it reads:');
+  diag_('The gateway says the sign-in has NO subscription key. Sending it a few ways to see which one it reads:');
   let accepted = null;
   attempts.forEach(function (attempt) {
     try {
@@ -1413,27 +1489,27 @@ function probeFastFieldSignIn_(subscriptionKey, user, password) {
       let parsed = null;
       try { parsed = JSON.parse(text); } catch (_) { parsed = null; }
       const ok = code === 200 && parsed && (parsed.sessionToken || (parsed.data && parsed.data.sessionToken));
-      Logger.log('  ' + attempt.label + ' (headers sent: ' + Object.keys(attempt.headers).join(', ') + '): HTTP ' + code +
+      diag_('  ' + attempt.label + ' (headers sent: ' + Object.keys(attempt.headers).join(', ') + '): HTTP ' + code +
         (ok ? ' (accepted: a session was issued)' : ' - ' + redactSecrets_(describeFastFieldError_({ parsed: parsed, text: text }), [subscriptionKey, password])));
       if (ok && !accepted) accepted = attempt.label;
     } catch (err) {
-      Logger.log('  ' + attempt.label + ': request failed (' + redactSecrets_(String(err && err.message ? err.message : err), [subscriptionKey, password]) + ')');
+      diag_('  ' + attempt.label + ': request failed (' + redactSecrets_(String(err && err.message ? err.message : err), [subscriptionKey, password]) + ')');
     }
   });
-  if (accepted) Logger.log('The gateway accepts the subscription key via: ' + accepted + '. Tell me which.');
-  else Logger.log('Every placement was refused. If any answer still says "missing", the sign-in endpoint reads the key from a name this script does not use; compare with the header or query name shown for the authenticate operation in the FastField developer portal.');
+  if (accepted) diag_('The gateway accepts the subscription key via: ' + accepted + '. Tell me which.');
+  else diag_('Every placement was refused. If any answer still says "missing", the sign-in endpoint reads the key from a name this script does not use; compare with the header or query name shown for the authenticate operation in the FastField developer portal.');
 }
 
 /** Logs a credential's summary without revealing it. `masked` shows only its ends. */
 function logSecretSummary_(label, raw, value, note) {
   if (!value) {
-    Logger.log(label + ': MISSING' + (note ? ' (' + note + ')' : ''));
+    diag_(label + ': MISSING' + (note ? ' (' + note + ')' : ''));
     return;
   }
   const info = describeKey_(raw, value);
-  Logger.log(label + ': present, ' + info.length + ' characters, masked ' + info.masked + ', 32-character hex: ' + info.isHex32);
-  if (info.hadSurroundingWhitespace || info.hadSurroundingQuotes) Logger.log('  Stray whitespace or quotes were removed before use.');
-  if (info.hasInternalWhitespace) Logger.log('  Warning: whitespace INSIDE the value (not removed): probably pasted with a line break.');
+  diag_(label + ': present, ' + info.length + ' characters, masked ' + info.masked + ', 32-character hex: ' + info.isHex32);
+  if (info.hadSurroundingWhitespace || info.hadSurroundingQuotes) diag_('  Stray whitespace or quotes were removed before use.');
+  if (info.hasInternalWhitespace) diag_('  Warning: whitespace INSIDE the value (not removed): probably pasted with a line break.');
 }
 
 /**
@@ -1453,87 +1529,87 @@ function logSecretSummary_(label, raw, value, note) {
 function testFastFieldDispatch() {
   const config = fastFieldConfig_();
   if (!config) {
-    Logger.log('Nothing was sent. FASTFIELD_SUBSCRIPTION_KEY, FASTFIELD_FORM_ID, FASTFIELD_USER_ID and FASTFIELD_PASSWORD (or FASTFIELD_SESSION_TOKEN_OVERRIDE) must be set in Script Properties.');
+    diag_('Nothing was sent. FASTFIELD_SUBSCRIPTION_KEY, FASTFIELD_FORM_ID, FASTFIELD_USER_ID and FASTFIELD_PASSWORD (or FASTFIELD_SESSION_TOKEN_OVERRIDE) must be set in Script Properties.');
     return null;
   }
   const props = PropertiesService.getScriptProperties();
   logSecretSummary_('FASTFIELD_SUBSCRIPTION_KEY (Azure gateway key)', props.getProperty('FASTFIELD_SUBSCRIPTION_KEY'), config.FASTFIELD_SUBSCRIPTION_KEY);
-  if (!/^[0-9a-f]{32}$/i.test(config.FASTFIELD_SUBSCRIPTION_KEY)) Logger.log('  Note: an Azure subscription key is normally 32 hexadecimal characters.');
-  Logger.log('FASTFIELD_USER_ID (login email and assigned user): ' + config.FASTFIELD_USER_ID);
-  Logger.log('FASTFIELD_PASSWORD: ' + (config.FASTFIELD_PASSWORD ? 'present (' + config.FASTFIELD_PASSWORD.length + ' characters)' : 'MISSING') +
+  if (!/^[0-9a-f]{32}$/i.test(config.FASTFIELD_SUBSCRIPTION_KEY)) diag_('  Note: an Azure subscription key is normally 32 hexadecimal characters.');
+  diag_('FASTFIELD_USER_ID (login email and assigned user): ' + config.FASTFIELD_USER_ID);
+  diag_('FASTFIELD_PASSWORD: ' + (config.FASTFIELD_PASSWORD ? 'present (' + config.FASTFIELD_PASSWORD.length + ' characters)' : 'MISSING') +
     (config.FASTFIELD_SESSION_TOKEN_OVERRIDE ? '; FASTFIELD_SESSION_TOKEN_OVERRIDE is set and will be used instead of signing in' : ''));
 
-  Logger.log('Step 1 of 4: signing in to FastField (POST ' + CONFIG.FASTFIELD_AUTH_URL + ')');
+  diag_('Step 1 of 4: signing in to FastField (POST ' + CONFIG.FASTFIELD_AUTH_URL + ')');
   const token = getFastFieldSessionToken_();
   if (!token) {
     const failure = fastFieldSession_.failure || { code: 0, text: '', error: '' };
     if (failure.error) {
-      Logger.log('Sign-in failed before FastField answered: ' + failure.error);
+      diag_('Sign-in failed before FastField answered: ' + failure.error);
     } else {
-      Logger.log('Sign-in failed: HTTP ' + failure.code);
-      Logger.log('Reply: ' + describeFastFieldError_({ parsed: (function () { try { return JSON.parse(failure.text); } catch (_) { return null; } })(), text: failure.text }));
+      diag_('Sign-in failed: HTTP ' + failure.code);
+      diag_('Reply: ' + describeFastFieldError_({ parsed: (function () { try { return JSON.parse(failure.text); } catch (_) { return null; } })(), text: failure.text }));
       if (failure.code === 401 && /missing subscription key/i.test(failure.text)) {
-        Logger.log('The gateway reports NO subscription key on the sign-in request. The request was sent with these header names: ' +
+        diag_('The gateway reports NO subscription key on the sign-in request. The request was sent with these header names: ' +
           'Authorization, FastField-API-Key and Ocp-Apim-Subscription-Key (each ' + config.FASTFIELD_SUBSCRIPTION_KEY.length + ' characters), Content-Type, Accept.');
         probeFastFieldSignIn_(config.FASTFIELD_SUBSCRIPTION_KEY, config.FASTFIELD_USER_ID, config.FASTFIELD_PASSWORD);
       } else if (failure.code === 401 && /subscription key/i.test(failure.text)) {
-        Logger.log('Azure API Management (the gateway) rejected the SUBSCRIPTION KEY. Check FASTFIELD_SUBSCRIPTION_KEY.');
+        diag_('Azure API Management (the gateway) rejected the SUBSCRIPTION KEY. Check FASTFIELD_SUBSCRIPTION_KEY.');
       } else if (failure.code === 401 || failure.code === 403) {
-        Logger.log('The gateway let the subscription key through, but FastField rejected the LOGIN. Check FASTFIELD_USER_ID (the account email) and FASTFIELD_PASSWORD.');
+        diag_('The gateway let the subscription key through, but FastField rejected the LOGIN. Check FASTFIELD_USER_ID (the account email) and FASTFIELD_PASSWORD.');
       } else if (failure.code === 404) {
-        Logger.log('Not found: check CONFIG.FASTFIELD_AUTH_URL.');
+        diag_('Not found: check CONFIG.FASTFIELD_AUTH_URL.');
       }
     }
-    Logger.log('Stopped: fix sign-in before anything else is tried.');
+    diag_('Stopped: fix sign-in before anything else is tried.');
     return null;
   }
   const how = { cache: 'a cached session', override: 'FASTFIELD_SESSION_TOKEN_OVERRIDE', authenticated: 'a new sign-in' }[fastFieldSession_.source] || 'unknown';
   logSecretSummary_('Session token (from ' + how + ')', token, token);
-  if (fastFieldSession_.expires) Logger.log('  Session expires: ' + fastFieldSession_.expires);
+  if (fastFieldSession_.expires) diag_('  Session expires: ' + fastFieldSession_.expires);
 
-  Logger.log('Step 2 of 4: forms check (GET ' + CONFIG.FASTFIELD_FORMS_URL + ')');
+  diag_('Step 2 of 4: forms check (GET ' + CONFIG.FASTFIELD_FORMS_URL + ')');
   const forms = fastFieldGet_(CONFIG.FASTFIELD_FORMS_URL, getFastFieldHeaders_(config.FASTFIELD_SUBSCRIPTION_KEY, token));
   if (forms.error) {
-    Logger.log('Request failed before FastField answered: ' + forms.error);
+    diag_('Request failed before FastField answered: ' + forms.error);
     return null;
   }
-  Logger.log('HTTP status: ' + forms.code);
+  diag_('HTTP status: ' + forms.code);
   if (forms.code !== 200) {
-    Logger.log('Reply: ' + describeFastFieldError_(forms));
+    diag_('Reply: ' + describeFastFieldError_(forms));
     if (forms.code === 401) {
-      Logger.log(/subscription key/i.test(forms.text)
+      diag_(/subscription key/i.test(forms.text)
         ? 'The gateway rejected the subscription key. Check FASTFIELD_SUBSCRIPTION_KEY.'
         : 'FastField rejected the session token (expired or invalid). Run again to sign in afresh' +
           (fastFieldSession_.source === 'override' ? ', and replace FASTFIELD_SESSION_TOKEN_OVERRIDE.' : '.'));
       if (fastFieldSession_.source !== 'override') clearFastFieldSessionToken_();
     } else if (forms.code === 404) {
-      Logger.log('Not found: check CONFIG.FASTFIELD_FORMS_URL.');
+      diag_('Not found: check CONFIG.FASTFIELD_FORMS_URL.');
     }
-    Logger.log('Stopped: fix the forms check before a task is sent.');
+    diag_('Stopped: fix the forms check before a task is sent.');
     return null;
   }
   const list = fastFieldFormList_(forms.parsed);
   if (!list) {
-    Logger.log('The forms reply was not a list I recognize, so the form id could not be checked. Reply: ' + forms.text.slice(0, 500));
-    Logger.log('Continuing without verifying the form.');
+    diag_('The forms reply was not a list I recognize, so the form id could not be checked. Reply: ' + forms.text.slice(0, 500));
+    diag_('Continuing without verifying the form.');
   } else {
     const wanted = String(config.FASTFIELD_FORM_ID);
     const match = list.filter(function (f) { return fastFieldFormId_(f) === wanted; })[0];
     if (match) {
-      Logger.log('Gateway cleared & forms verified: ' + list.map(fastFieldFormName_).join(', '));
-      Logger.log('Form verified: ' + fastFieldFormName_(match));
+      diag_('Gateway cleared & forms verified: ' + list.map(fastFieldFormName_).join(', '));
+      diag_('Form verified: ' + fastFieldFormName_(match));
     } else {
-      Logger.log('FASTFIELD_FORM_ID "' + wanted + '" is not among the ' + list.length + ' form(s) this account can see. Available forms:');
-      list.forEach(function (f) { Logger.log('  ' + fastFieldFormId_(f) + '  ' + fastFieldFormName_(f)); });
-      Logger.log('Stopped: correct FASTFIELD_FORM_ID in Script Properties (or the login belongs to a different account).');
+      diag_('FASTFIELD_FORM_ID "' + wanted + '" is not among the ' + list.length + ' form(s) this account can see. Available forms:');
+      list.forEach(function (f) { diag_('  ' + fastFieldFormId_(f) + '  ' + fastFieldFormName_(f)); });
+      diag_('Stopped: correct FASTFIELD_FORM_ID in Script Properties (or the login belongs to a different account).');
       return null;
     }
   }
 
-  Logger.log('Step 3 of 4: finding the recipient (GET ' + CONFIG.FASTFIELD_USERS_URL + ')');
+  diag_('Step 3 of 4: finding the recipient (GET ' + CONFIG.FASTFIELD_USERS_URL + ')');
   const found = discoverFastFieldUser_(config, token);
 
-  Logger.log('Step 4 of 4: sending a TEST task (it will show up on the driver\'s list; delete it afterwards).');
+  diag_('Step 4 of 4: sending a TEST task (it will show up on the driver\'s list; delete it afterwards).');
   const testCall = {
     call_id: 'TEST-DISPATCH-001',
     outcome: OUTCOME_WON,
@@ -1549,33 +1625,33 @@ function testFastFieldDispatch() {
   };
   const result = sendFastFieldDispatch_(testCall);
   if (!result) {
-    Logger.log('Nothing was sent (see above).');
+    diag_('Nothing was sent (see above).');
     return null;
   }
   if (result.error) {
-    Logger.log('Request failed before FastField answered: ' + result.error);
+    diag_('Request failed before FastField answered: ' + result.error);
     return null;
   }
-  if (result.retried) Logger.log('The first attempt got HTTP 401, so a fresh session was started and the dispatch retried once.');
-  Logger.log('HTTP status: ' + result.code);
-  Logger.log('Response headers: ' + JSON.stringify(result.headers));
-  if (result.parsed) Logger.log('Parsed response: ' + JSON.stringify(result.parsed));
-  else Logger.log('Response body (not JSON): ' + result.text.slice(0, 1000));
+  if (result.retried) diag_('The first attempt got HTTP 401, so a fresh session was started and the dispatch retried once.');
+  diag_('HTTP status: ' + result.code);
+  diag_('Response headers: ' + JSON.stringify(redactHeaders_(result.headers)));
+  if (result.parsed) diag_('Parsed response: ' + JSON.stringify(result.parsed));
+  else diag_('Response body (not JSON): ' + result.text.slice(0, 1000));
   if (result.code === 200 || result.code === 201) {
-    Logger.log(result.id
+    diag_(result.id
       ? 'OK. FastField created task ' + result.id + '.'
       : 'FastField answered OK but the reply has no dispatchId, taskId or id; check the reply above.');
   } else if (result.code === 400 || result.code === 422) {
-    Logger.log('FastField rejected the request as invalid. Its message: ' + describeFastFieldError_(result));
+    diag_('FastField rejected the request as invalid. Its message: ' + describeFastFieldError_(result));
   } else if (result.code === 401 || result.code === 403) {
-    Logger.log('Rejected: the session or subscription key was not accepted for dispatching.');
+    diag_('Rejected: the session or subscription key was not accepted for dispatching.');
   } else if (isRecipientNotFound_(result)) {
-    Logger.log('FastField\'s own server answered (the route is right) but there is no such recipient: "' + describeFastFieldError_(result) + '".');
+    diag_('FastField\'s own server answered (the route is right) but there is no such recipient: "' + describeFastFieldError_(result) + '".');
     tryFastFieldRecipientFormats_(config, getFastFieldSessionToken_(), testCall, found);
   } else if (result.code === 404) {
-    Logger.log('Not found. If the reply is {"statusCode":404,"message":"Resource not found"} the Azure gateway has no such route (check CONFIG.FASTFIELD_DISPATCH_URL); anything else came from FastField\'s own server. Reply: ' + describeFastFieldError_(result));
+    diag_('Not found. If the reply is {"statusCode":404,"message":"Resource not found"} the Azure gateway has no such route (check CONFIG.FASTFIELD_DISPATCH_URL); anything else came from FastField\'s own server. Reply: ' + describeFastFieldError_(result));
   } else {
-    Logger.log('Rejected: see the reply above for FastField\'s reason.');
+    diag_('Rejected: see the reply above for FastField\'s reason.');
   }
   return result.parsed;
 }
@@ -1632,34 +1708,34 @@ function isRecipientNotFound_(result) {
 function discoverFastFieldUser_(config, sessionToken) {
   const response = fastFieldGet_(CONFIG.FASTFIELD_USERS_URL, getFastFieldHeaders_(config.FASTFIELD_SUBSCRIPTION_KEY, sessionToken));
   if (response.error) {
-    Logger.log('Users request failed before FastField answered: ' + response.error);
+    diag_('Users request failed before FastField answered: ' + response.error);
     return null;
   }
-  Logger.log('HTTP status: ' + response.code);
+  diag_('HTTP status: ' + response.code);
   if (response.code !== 200) {
-    Logger.log('Could not list users (continuing). Reply: ' + response.text.slice(0, 500));
+    diag_('Could not list users (continuing). Reply: ' + response.text.slice(0, 500));
     return null;
   }
   const users = fastFieldUserList_(response.parsed);
   if (!users) {
-    Logger.log('The users reply was not a list I recognize. Reply: ' + response.text.slice(0, 500));
+    diag_('The users reply was not a list I recognize. Reply: ' + response.text.slice(0, 500));
     return null;
   }
-  Logger.log('Users this account can see (' + users.length + '):');
+  diag_('Users this account can see (' + users.length + '):');
   users.slice(0, 50).forEach(function (u) {
-    Logger.log('  id: ' + (fastFieldUserId_(u) || '(none)') + ' | email: ' + (fastFieldUserEmail_(u) || '(none)') +
+    diag_('  id: ' + (fastFieldUserId_(u) || '(none)') + ' | email: ' + (fastFieldUserEmail_(u) || '(none)') +
       ' | role: ' + (fastFieldNames_(fastFieldFirst_(u, ['role', 'roles', 'userRole', 'roleName'])) || '(none)') +
       ' | groups: ' + (fastFieldNames_(fastFieldFirst_(u, ['groups', 'userGroups', 'groupNames', 'group'])) || '(none)'));
   });
-  if (users.length > 50) Logger.log('  ... and ' + (users.length - 50) + ' more.');
+  if (users.length > 50) diag_('  ... and ' + (users.length - 50) + ' more.');
   const wanted = config.FASTFIELD_USER_ID.toLowerCase();
   const match = users.filter(function (u) { return fastFieldUserEmail_(u).toLowerCase() === wanted; })[0];
   if (!match) {
-    Logger.log('No user has the email FASTFIELD_USER_ID (' + config.FASTFIELD_USER_ID + '). A task can only go to a user or group that exists in this account.');
+    diag_('No user has the email FASTFIELD_USER_ID (' + config.FASTFIELD_USER_ID + '). A task can only go to a user or group that exists in this account.');
     return { users: users, match: null, id: '' };
   }
   const id = fastFieldUserId_(match);
-  Logger.log('Found ' + config.FASTFIELD_USER_ID + ' as user id ' + (id || '(the user has no id field; see the list above)') + '.');
+  diag_('Found ' + config.FASTFIELD_USER_ID + ' as user id ' + (id || '(the user has no id field; see the list above)') + '.');
   return { users: users, match: match, id: id };
 }
 
@@ -1681,7 +1757,7 @@ function tryFastFieldRecipientFormats_(config, sessionToken, testCall, found) {
   candidates.push({ field: 'userIds', value: config.FASTFIELD_USER_ID });
   const seen = {};
   seen[first.field + '=' + first.value] = true;
-  Logger.log('FastField did not find the recipient. Trying other ways to name them:');
+  diag_('FastField did not find the recipient. Trying other ways to name them:');
   for (let i = 0; i < candidates.length; i++) {
     const c = candidates[i];
     const key = c.field + '=' + c.value;
@@ -1691,29 +1767,29 @@ function tryFastFieldRecipientFormats_(config, sessionToken, testCall, found) {
     const attempt = postFastFieldDispatch_(config.FASTFIELD_SUBSCRIPTION_KEY, sessionToken,
       buildFastFieldPayload_(testCall, formId, c), undefined);
     if (attempt.error) {
-      Logger.log('  ' + label + ': request failed (' + attempt.error + ')');
+      diag_('  ' + label + ': request failed (' + attempt.error + ')');
       continue;
     }
-    Logger.log('  ' + label + ': HTTP ' + attempt.code + ' ' + attempt.text.slice(0, 1000));
+    diag_('  ' + label + ': HTTP ' + attempt.code + ' ' + attempt.text.slice(0, 1000));
     if (isRecipientNotFound_(attempt)) continue;
     if (attempt.code === 200 || attempt.code === 201) {
-      Logger.log('ACCEPTED with ' + label + (attempt.id ? ' (task ' + attempt.id + ' created; delete it from the driver\'s list)' : '') + '.');
+      diag_('ACCEPTED with ' + label + (attempt.id ? ' (task ' + attempt.id + ' created; delete it from the driver\'s list)' : '') + '.');
       const settings = [];
       if (c.value !== config.FASTFIELD_USER_ID) settings.push('FASTFIELD_RECIPIENT_ID = ' + c.value);
       if (c.field !== 'users') settings.push('FASTFIELD_RECIPIENT_FIELD = ' + c.field);
-      Logger.log(settings.length
+      diag_(settings.length
         ? 'To use it for real dispatches, set in Script Properties: ' + settings.join(' and ') + '.'
         : 'This is already how dispatches name the recipient.');
     } else {
-      Logger.log('FastField gave a different answer this time (not "recipient not found"), so it accepted ' + label + ' as a recipient and rejected something else. Its message: ' + describeFastFieldError_(attempt));
+      diag_('FastField gave a different answer this time (not "recipient not found"), so it accepted ' + label + ' as a recipient and rejected something else. Its message: ' + describeFastFieldError_(attempt));
       const settings = [];
       if (c.value !== config.FASTFIELD_USER_ID) settings.push('FASTFIELD_RECIPIENT_ID = ' + c.value);
       if (c.field !== 'users') settings.push('FASTFIELD_RECIPIENT_FIELD = ' + c.field);
-      if (settings.length) Logger.log('Likely recipient settings: ' + settings.join(' and ') + '.');
+      if (settings.length) diag_('Likely recipient settings: ' + settings.join(' and ') + '.');
     }
     return c;
   }
-  Logger.log('No way of naming the recipient was accepted. Check the user list above: the recipient must be a user (or user group) in this FastField account.');
+  diag_('No way of naming the recipient was accepted. Check the user list above: the recipient must be a user (or user group) in this FastField account.');
   return null;
 }
 
