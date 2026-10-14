@@ -50,13 +50,12 @@ const CONFIG = Object.freeze({
   ROW_GROWTH: 500,
   // How long a customer's shared location stays readable (and how long a link stays valid).
   LOCATION_TTL_SECONDS: 15 * 60,
-  // FastField's v3 API: the one place these addresses live. The gateway answers 404 for v1 and for
-  // the plural /dispatches; the dispatch route is the singular /dispatch.
+  // FastField's v3 API: the one place these addresses live. The dispatch route is the singular
+  // /dispatch (confirmed: FastField's own server answers it).
   FASTFIELD_DISPATCH_URL: FASTFIELD_API_BASE + '/dispatch',
   FASTFIELD_FORMS_URL: FASTFIELD_API_BASE + '/forms',
   FASTFIELD_AUTH_URL: FASTFIELD_API_BASE + '/authenticate',
-  // Only tried by testFastFieldDispatch's route discovery, if the dispatch address above is a 404.
-  FASTFIELD_TASKS_URL: FASTFIELD_API_BASE + '/tasks',
+  FASTFIELD_USERS_URL: FASTFIELD_API_BASE + '/users',
   // The login session token is cached for at most this long (the longest CacheService allows), and
   // for less if FastField says it expires sooner.
   FASTFIELD_SESSION_TTL_SECONDS: 21600,
@@ -1067,6 +1066,9 @@ function fastFieldConfig_() {
   });
   config.FASTFIELD_PASSWORD = getScriptProperty_('FASTFIELD_PASSWORD');
   config.FASTFIELD_SESSION_TOKEN_OVERRIDE = getScriptProperty_('FASTFIELD_SESSION_TOKEN_OVERRIDE');
+  // Optional: who a task is assigned to, if FastField wants something other than the login email.
+  config.FASTFIELD_RECIPIENT_ID = getScriptProperty_('FASTFIELD_RECIPIENT_ID');
+  config.FASTFIELD_RECIPIENT_FIELD = getScriptProperty_('FASTFIELD_RECIPIENT_FIELD');
   if (!config.FASTFIELD_PASSWORD && !config.FASTFIELD_SESSION_TOKEN_OVERRIDE) {
     missing.push('FASTFIELD_PASSWORD');
   }
@@ -1192,15 +1194,24 @@ function clearFastFieldSessionToken_() {
   CacheService.getScriptCache().remove(CONFIG.FASTFIELD_SESSION_CACHE_KEY);
 }
 
-/** The dispatch body: the form, who it goes to, and the merge fields that pre-fill the job. */
-function buildFastFieldPayload_(callData, formId, userId) {
+// How a recipient may be named in a dispatch body.
+const FASTFIELD_RECIPIENT_FIELDS = Object.freeze(['users', 'userIds', 'userEmail']);
+
+/** Who a dispatch goes to: { field, value }, from the optional RECIPIENT properties, else the login email. */
+function fastFieldRecipient_(config) {
+  const field = FASTFIELD_RECIPIENT_FIELDS.indexOf(config.FASTFIELD_RECIPIENT_FIELD) !== -1
+    ? config.FASTFIELD_RECIPIENT_FIELD : 'users';
+  return { field: field, value: config.FASTFIELD_RECIPIENT_ID || config.FASTFIELD_USER_ID };
+}
+
+/** The dispatch body: the form, who it goes to (`recipient`: { field, value }), and the merge fields that pre-fill the job. */
+function buildFastFieldPayload_(callData, formId, recipient) {
   const notes = callData.notes_comments === undefined || callData.notes_comments === null
     ? '' : String(callData.notes_comments).trim();
   const quote = callData.quoted_price ? 'Quoted: $' + callData.quoted_price : '';
   const text = function (v) { return v === undefined || v === null ? '' : v; };
   const payload = {
     formId: formId,
-    users: [userId],
     autoCreateUsers: false,
     mergeFields: {
       alpha_1: callData.call_id,
@@ -1214,6 +1225,8 @@ function buildFastFieldPayload_(callData, formId, userId) {
       listpicker_2: text(callData.service_requested),
     },
   };
+  // `users` and `userIds` take a list; `userEmail` a single address.
+  payload[recipient.field] = recipient.field === 'userEmail' ? recipient.value : [recipient.value];
   return payload;
 }
 
@@ -1233,7 +1246,7 @@ function sendFastFieldDispatch_(callData) {
     return null;
   }
 
-  const payload = buildFastFieldPayload_(callData, formId, config.FASTFIELD_USER_ID);
+  const payload = buildFastFieldPayload_(callData, formId, fastFieldRecipient_(config));
 
   const token = getFastFieldSessionToken_();
   if (!token) {
@@ -1429,8 +1442,11 @@ function logSecretSummary_(label, raw, value, note) {
  *   1. Sign in: get a session token (cached, override, or a fresh POST /authenticate) and show a
  *      masked summary of it.
  *   2. Forms: GET the forms list with the session headers and look for FASTFIELD_FORM_ID.
- *   3. Dispatch: send one clearly marked TEST task and log the status, headers and reply (with
- *      FastField's own message for a 400 or 422).
+ *   3. Recipient: GET the account's users, list them (id, email, role, groups) and find
+ *      FASTFIELD_USER_ID among them.
+ *   4. Dispatch: send one clearly marked TEST task and log the status, headers and reply (with
+ *      FastField's own message for a 400 or 422). If FastField says the recipient was not found, the
+ *      user id and other ways of naming the recipient are tried.
  * It never touches the Call Log. The task is real, though: it appears on the driver's FastField
  * list, so delete it there afterwards. Returns the parsed dispatch reply, or null if it stopped.
  */
@@ -1447,7 +1463,7 @@ function testFastFieldDispatch() {
   Logger.log('FASTFIELD_PASSWORD: ' + (config.FASTFIELD_PASSWORD ? 'present (' + config.FASTFIELD_PASSWORD.length + ' characters)' : 'MISSING') +
     (config.FASTFIELD_SESSION_TOKEN_OVERRIDE ? '; FASTFIELD_SESSION_TOKEN_OVERRIDE is set and will be used instead of signing in' : ''));
 
-  Logger.log('Step 1 of 3: signing in to FastField (POST ' + CONFIG.FASTFIELD_AUTH_URL + ')');
+  Logger.log('Step 1 of 4: signing in to FastField (POST ' + CONFIG.FASTFIELD_AUTH_URL + ')');
   const token = getFastFieldSessionToken_();
   if (!token) {
     const failure = fastFieldSession_.failure || { code: 0, text: '', error: '' };
@@ -1475,7 +1491,7 @@ function testFastFieldDispatch() {
   logSecretSummary_('Session token (from ' + how + ')', token, token);
   if (fastFieldSession_.expires) Logger.log('  Session expires: ' + fastFieldSession_.expires);
 
-  Logger.log('Step 2 of 3: forms check (GET ' + CONFIG.FASTFIELD_FORMS_URL + ')');
+  Logger.log('Step 2 of 4: forms check (GET ' + CONFIG.FASTFIELD_FORMS_URL + ')');
   const forms = fastFieldGet_(CONFIG.FASTFIELD_FORMS_URL, getFastFieldHeaders_(config.FASTFIELD_SUBSCRIPTION_KEY, token));
   if (forms.error) {
     Logger.log('Request failed before FastField answered: ' + forms.error);
@@ -1499,7 +1515,7 @@ function testFastFieldDispatch() {
   const list = fastFieldFormList_(forms.parsed);
   if (!list) {
     Logger.log('The forms reply was not a list I recognize, so the form id could not be checked. Reply: ' + forms.text.slice(0, 500));
-    Logger.log('Continuing to step 3 without verifying the form.');
+    Logger.log('Continuing without verifying the form.');
   } else {
     const wanted = String(config.FASTFIELD_FORM_ID);
     const match = list.filter(function (f) { return fastFieldFormId_(f) === wanted; })[0];
@@ -1514,7 +1530,10 @@ function testFastFieldDispatch() {
     }
   }
 
-  Logger.log('Step 3 of 3: sending a TEST task (it will show up on the driver\'s list; delete it afterwards).');
+  Logger.log('Step 3 of 4: finding the recipient (GET ' + CONFIG.FASTFIELD_USERS_URL + ')');
+  const found = discoverFastFieldUser_(config, token);
+
+  Logger.log('Step 4 of 4: sending a TEST task (it will show up on the driver\'s list; delete it afterwards).');
   const testCall = {
     call_id: 'TEST-DISPATCH-001',
     outcome: OUTCOME_WON,
@@ -1550,52 +1569,151 @@ function testFastFieldDispatch() {
     Logger.log('FastField rejected the request as invalid. Its message: ' + describeFastFieldError_(result));
   } else if (result.code === 401 || result.code === 403) {
     Logger.log('Rejected: the session or subscription key was not accepted for dispatching.');
+  } else if (isRecipientNotFound_(result)) {
+    Logger.log('FastField\'s own server answered (the route is right) but there is no such recipient: "' + describeFastFieldError_(result) + '".');
+    tryFastFieldRecipientFormats_(config, getFastFieldSessionToken_(), testCall, found);
   } else if (result.code === 404) {
-    Logger.log('Not found: ' + CONFIG.FASTFIELD_DISPATCH_URL + ' is not a route the gateway knows. Looking for the right one:');
-    discoverFastFieldDispatchRoute_(config, getFastFieldSessionToken_(), testCall);
+    Logger.log('Not found. If the reply is {"statusCode":404,"message":"Resource not found"} the Azure gateway has no such route (check CONFIG.FASTFIELD_DISPATCH_URL); anything else came from FastField\'s own server. Reply: ' + describeFastFieldError_(result));
   } else {
     Logger.log('Rejected: see the reply above for FastField\'s reason.');
   }
   return result.parsed;
 }
 
+// ---- user discovery for testFastFieldDispatch ----
+
+function fastFieldFirst_(obj, keys) {
+  for (let i = 0; i < keys.length; i++) {
+    const v = obj && obj[keys[i]];
+    if (v !== undefined && v !== null && v !== '') return v;
+  }
+  return '';
+}
+
+/** A readable form of one field that may be a string, a list or a list of objects. */
+function fastFieldNames_(value) {
+  if (value === undefined || value === null || value === '') return '';
+  if (Array.isArray(value)) {
+    return value.map(function (v) { return typeof v === 'object' && v ? String(fastFieldFirst_(v, ['name', 'groupName', 'title', 'id'])) : String(v); }).join('; ');
+  }
+  if (typeof value === 'object') return String(fastFieldFirst_(value, ['name', 'groupName', 'title', 'id']));
+  return String(value);
+}
+
+function fastFieldUserId_(user) {
+  const id = fastFieldFirst_(user, ['id', 'userId', 'UserId', 'userID', 'uid', 'guid']);
+  return id === '' ? '' : String(id);
+}
+
+function fastFieldUserEmail_(user) {
+  return String(fastFieldFirst_(user, ['email', 'emailAddress', 'EmailAddress', 'userName', 'username', 'login'])).trim();
+}
+
+function fastFieldUserList_(parsed) {
+  if (Array.isArray(parsed)) return parsed;
+  if (!parsed || typeof parsed !== 'object') return null;
+  const keys = ['users', 'data', 'items', 'results'];
+  for (let i = 0; i < keys.length; i++) {
+    if (Array.isArray(parsed[keys[i]])) return parsed[keys[i]];
+  }
+  return null;
+}
+
+/** FastField's own application answered "no such recipient" (not the gateway's route-not-found). */
+function isRecipientNotFound_(result) {
+  return result.code === 404 && /Recipient User or User Group not found/i.test(result.text);
+}
+
 /**
- * After the dispatch address answers 404, tries the other routes a dispatch might live at, each with
- * the same body and session, and logs the exact status and reply of every one. It stops at the first
- * route that is not a 404: that is the one the gateway recognizes (a 400 or 422 still means the route
- * exists and only the body needs adjusting). A route that accepts the request creates a real test
- * task, so it stops there rather than trying more.
+ * Lists the account's users (GET /users) and finds the one matching `login`. Returns
+ * { users, match, id } (id is the match's user id or ''), or null if the list could not be read.
+ * Never fatal: a failure is logged and the dispatch test goes on.
  */
-function discoverFastFieldDispatchRoute_(config, sessionToken, testCall) {
-  if (!sessionToken) {
-    Logger.log('No session token, so no other routes were tried.');
+function discoverFastFieldUser_(config, sessionToken) {
+  const response = fastFieldGet_(CONFIG.FASTFIELD_USERS_URL, getFastFieldHeaders_(config.FASTFIELD_SUBSCRIPTION_KEY, sessionToken));
+  if (response.error) {
+    Logger.log('Users request failed before FastField answered: ' + response.error);
     return null;
   }
+  Logger.log('HTTP status: ' + response.code);
+  if (response.code !== 200) {
+    Logger.log('Could not list users (continuing). Reply: ' + response.text.slice(0, 500));
+    return null;
+  }
+  const users = fastFieldUserList_(response.parsed);
+  if (!users) {
+    Logger.log('The users reply was not a list I recognize. Reply: ' + response.text.slice(0, 500));
+    return null;
+  }
+  Logger.log('Users this account can see (' + users.length + '):');
+  users.slice(0, 50).forEach(function (u) {
+    Logger.log('  id: ' + (fastFieldUserId_(u) || '(none)') + ' | email: ' + (fastFieldUserEmail_(u) || '(none)') +
+      ' | role: ' + (fastFieldNames_(fastFieldFirst_(u, ['role', 'roles', 'userRole', 'roleName'])) || '(none)') +
+      ' | groups: ' + (fastFieldNames_(fastFieldFirst_(u, ['groups', 'userGroups', 'groupNames', 'group'])) || '(none)'));
+  });
+  if (users.length > 50) Logger.log('  ... and ' + (users.length - 50) + ' more.');
+  const wanted = config.FASTFIELD_USER_ID.toLowerCase();
+  const match = users.filter(function (u) { return fastFieldUserEmail_(u).toLowerCase() === wanted; })[0];
+  if (!match) {
+    Logger.log('No user has the email FASTFIELD_USER_ID (' + config.FASTFIELD_USER_ID + '). A task can only go to a user or group that exists in this account.');
+    return { users: users, match: null, id: '' };
+  }
+  const id = fastFieldUserId_(match);
+  Logger.log('Found ' + config.FASTFIELD_USER_ID + ' as user id ' + (id || '(the user has no id field; see the list above)') + '.');
+  return { users: users, match: match, id: id };
+}
+
+/**
+ * When the first dispatch got FastField's "Recipient User or User Group not found", sends the same
+ * task naming the recipient other ways (the user's id in `users`, in `userIds`, and the email in
+ * `userEmail`), logging each exact status and reply, and stops at the first that FastField does not
+ * answer with that same error. Whatever it accepts creates a real test task.
+ */
+function tryFastFieldRecipientFormats_(config, sessionToken, testCall, found) {
   const formId = Number(config.FASTFIELD_FORM_ID);
-  const payload = buildFastFieldPayload_(testCall, formId, config.FASTFIELD_USER_ID);
-  const routes = [
-    CONFIG.FASTFIELD_FORMS_URL + '/' + formId + '/dispatch',
-    CONFIG.FASTFIELD_TASKS_URL,
-  ];
-  for (let i = 0; i < routes.length; i++) {
-    const attempt = postFastFieldDispatch_(config.FASTFIELD_SUBSCRIPTION_KEY, sessionToken, payload, routes[i]);
+  const first = fastFieldRecipient_(config);
+  const candidates = [];
+  if (found && found.id) {
+    candidates.push({ field: 'users', value: found.id });
+    candidates.push({ field: 'userIds', value: found.id });
+  }
+  candidates.push({ field: 'userEmail', value: config.FASTFIELD_USER_ID });
+  candidates.push({ field: 'userIds', value: config.FASTFIELD_USER_ID });
+  const seen = {};
+  seen[first.field + '=' + first.value] = true;
+  Logger.log('FastField did not find the recipient. Trying other ways to name them:');
+  for (let i = 0; i < candidates.length; i++) {
+    const c = candidates[i];
+    const key = c.field + '=' + c.value;
+    if (seen[key]) continue;
+    seen[key] = true;
+    const label = c.field + (c.field === 'userEmail' ? ': <email>' : ': [' + (c.value === config.FASTFIELD_USER_ID ? '<email>' : 'user id ' + c.value) + ']');
+    const attempt = postFastFieldDispatch_(config.FASTFIELD_SUBSCRIPTION_KEY, sessionToken,
+      buildFastFieldPayload_(testCall, formId, c), undefined);
     if (attempt.error) {
-      Logger.log('  POST ' + routes[i] + ': request failed (' + attempt.error + ')');
+      Logger.log('  ' + label + ': request failed (' + attempt.error + ')');
       continue;
     }
-    Logger.log('  POST ' + routes[i] + ': HTTP ' + attempt.code + ' ' + attempt.text.slice(0, 1000));
-    if (attempt.code !== 404) {
-      if (attempt.code === 200 || attempt.code === 201) {
-        Logger.log('The gateway ACCEPTED ' + routes[i] + (attempt.id ? ' (task ' + attempt.id + ' created; delete it from the driver\'s list)' : '') +
-          '. Tell me this route and I will make it the dispatch address.');
-      } else {
-        Logger.log('The gateway KNOWS ' + routes[i] + ' (HTTP ' + attempt.code + ', not 404), so the route exists and the request body or credentials need adjusting. Its message: ' +
-          describeFastFieldError_(attempt));
-      }
-      return routes[i];
+    Logger.log('  ' + label + ': HTTP ' + attempt.code + ' ' + attempt.text.slice(0, 1000));
+    if (isRecipientNotFound_(attempt)) continue;
+    if (attempt.code === 200 || attempt.code === 201) {
+      Logger.log('ACCEPTED with ' + label + (attempt.id ? ' (task ' + attempt.id + ' created; delete it from the driver\'s list)' : '') + '.');
+      const settings = [];
+      if (c.value !== config.FASTFIELD_USER_ID) settings.push('FASTFIELD_RECIPIENT_ID = ' + c.value);
+      if (c.field !== 'users') settings.push('FASTFIELD_RECIPIENT_FIELD = ' + c.field);
+      Logger.log(settings.length
+        ? 'To use it for real dispatches, set in Script Properties: ' + settings.join(' and ') + '.'
+        : 'This is already how dispatches name the recipient.');
+    } else {
+      Logger.log('FastField gave a different answer this time (not "recipient not found"), so it accepted ' + label + ' as a recipient and rejected something else. Its message: ' + describeFastFieldError_(attempt));
+      const settings = [];
+      if (c.value !== config.FASTFIELD_USER_ID) settings.push('FASTFIELD_RECIPIENT_ID = ' + c.value);
+      if (c.field !== 'users') settings.push('FASTFIELD_RECIPIENT_FIELD = ' + c.field);
+      if (settings.length) Logger.log('Likely recipient settings: ' + settings.join(' and ') + '.');
     }
+    return c;
   }
-  Logger.log('Every route was a 404. Compare with the dispatch operation in the FastField developer portal (its method and URL template).');
+  Logger.log('No way of naming the recipient was accepted. Check the user list above: the recipient must be a user (or user group) in this FastField account.');
   return null;
 }
 

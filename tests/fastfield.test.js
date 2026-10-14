@@ -16,8 +16,7 @@ const TOKEN = '0f1e2d3c4b5a69788796a5b4c3d2e1f0';
 const WON = '1 - Won / Booked';
 const LOST = '0 - Lost / Declined';
 const FF_URL = 'https://api.fastfieldforms.com/services/v3/dispatch';
-const FORM_DISPATCH_URL = 'https://api.fastfieldforms.com/services/v3/forms/98765/dispatch';
-const TASKS_URL = 'https://api.fastfieldforms.com/services/v3/tasks';
+const USERS_URL = 'https://api.fastfieldforms.com/services/v3/users';
 const FORMS_URL = 'https://api.fastfieldforms.com/services/v3/forms';
 const AUTH_URL = 'https://api.fastfieldforms.com/services/v3/authenticate';
 const SESSION_KEY = 'fastfield_session_token';
@@ -474,7 +473,7 @@ test('sign-in request: every FastField request after it carries the same subscri
   const env = configure(makeContext());
   fastFieldServer(env);
   env.ctx.testFastFieldDispatch();
-  assert.equal(env.fetchCalls.length, 3);
+  assert.equal(env.fetchCalls.length, 4);
   env.fetchCalls.forEach((c) => {
     assert.equal(c.options.headers['Ocp-Apim-Subscription-Key'], SUB, c.url);
     assert.equal(c.options.headers['FastField-API-Key'], SUB, c.url);
@@ -482,6 +481,7 @@ test('sign-in request: every FastField request after it carries the same subscri
   assert.equal(env.fetchCalls[0].options.headers['X-Gatekeeper-SessionToken'], undefined, 'sign-in has no session yet');
   assert.equal(env.fetchCalls[1].options.headers['X-Gatekeeper-SessionToken'], TOKEN);
   assert.equal(env.fetchCalls[2].options.headers['X-Gatekeeper-SessionToken'], TOKEN);
+  assert.equal(env.fetchCalls[3].options.headers['X-Gatekeeper-SessionToken'], TOKEN);
 });
 
 test('sign-in request: an exception that mentions a secret is redacted before it is logged', () => {
@@ -577,12 +577,18 @@ test('session: a retry still never holds the sheet lock, and the app sync gets i
 // --- testFastFieldDispatch ---------------------------------------------------
 
 const FORMS = [{ id: 11111, name: 'Inspection' }, { id: 98765, name: 'Recovery Towing Service Form' }];
+const USERS = [
+  { id: 5001, email: 'owner@recoverytowing.example', role: 'Administrator', groups: [] },
+  { id: 5002, email: 'Driver@RecoveryTowing.example', role: 'Mobile User', groups: [{ name: 'Drivers' }, { name: 'Night shift' }] },
+];
 
 /** Answers the forms list and the dispatch like FastField would (sign-in is answered by authRespond). */
-function fastFieldServer(env, { forms = { code: 200, body: JSON.stringify(FORMS) }, dispatch } = {}) {
-  env.fetcher.respond = (url) => (url === FORMS_URL
-    ? forms
-    : (dispatch || { code: 201, body: JSON.stringify({ dispatchId: 'T-55' }), headers: { 'X-Req': 'abc' } }));
+function fastFieldServer(env, { forms = { code: 200, body: JSON.stringify(FORMS) }, users = { code: 200, body: JSON.stringify(USERS) }, dispatch } = {}) {
+  env.fetcher.respond = (url) => {
+    if (url === FORMS_URL) return forms;
+    if (url === USERS_URL) return users;
+    return dispatch || { code: 201, body: JSON.stringify({ dispatchId: 'T-55' }), headers: { 'X-Req': 'abc' } };
+  };
 }
 
 const logText = (env) => env.logger.join('\n');
@@ -597,12 +603,13 @@ test('testFastFieldDispatch: signs in, checks the forms with the session, then s
   const result = env.ctx.testFastFieldDispatch();
   assert.deepEqual(JSON.parse(JSON.stringify(result)), { dispatchId: 'T-55' });
 
-  assert.deepEqual(env.fetchCalls.map((c) => c.url), [AUTH_URL, FORMS_URL, FF_URL], 'three steps, in order');
+  assert.deepEqual(env.fetchCalls.map((c) => c.url), [AUTH_URL, FORMS_URL, USERS_URL, FF_URL], 'four steps, in order');
   assert.equal(env.fetchCalls[0].options.headers.Authorization, basic(USER, PASSWORD));
   assert.equal(env.fetchCalls[1].options.method, 'get');
   assertSessionHeaders(env.fetchCalls[1]);
   assertSessionHeaders(env.fetchCalls[2]);
-  const sent = JSON.parse(env.fetchCalls[2].options.payload);
+  assertSessionHeaders(env.fetchCalls[3]);
+  const sent = JSON.parse(env.fetchCalls[3].options.payload);
   assert.deepEqual(sent.users, [USER]);
   assert.equal(sent.autoCreateUsers, false);
   assert.equal(sent.mergeFields.alpha_1, 'TEST-DISPATCH-001');
@@ -614,11 +621,11 @@ test('testFastFieldDispatch: signs in, checks the forms with the session, then s
   assert.match(sent.mergeFields.multiline_1, /TEST DISPATCH.*Quoted: \$150/);
 
   const log = logText(env);
-  assert.match(log, /Step 1 of 3[\s\S]*Session token \(from a new sign-in\): present, 32 characters, masked 0f1e\.\.\.e1f0, 32-character hex: true/);
+  assert.match(log, /Step 1 of 4[\s\S]*Session token \(from a new sign-in\): present, 32 characters, masked 0f1e\.\.\.e1f0, 32-character hex: true/);
   assert.match(log, /Session expires: /);
-  assert.match(log, /Step 2 of 3[\s\S]*HTTP status: 200[\s\S]*Gateway cleared & forms verified: Inspection, Recovery Towing Service Form/);
+  assert.match(log, /Step 2 of 4[\s\S]*HTTP status: 200[\s\S]*Gateway cleared & forms verified: Inspection, Recovery Towing Service Form/);
   assert.match(log, /Form verified: Recovery Towing Service Form/);
-  assert.match(log, /Step 3 of 3[\s\S]*HTTP status: 201[\s\S]*OK\. FastField created task T-55/);
+  assert.match(log, /Step 4 of 4[\s\S]*HTTP status: 201[\s\S]*OK\. FastField created task T-55/);
   assert.match(log, /X-Req/);
   noSecrets(env);
   assert.equal(JSON.stringify(env.sheet.data), before, 'the Call Log is untouched');
@@ -645,7 +652,7 @@ test('testFastFieldDispatch: says where the session came from, and summarizes th
   env.ctx.testFastFieldDispatch();
   const log = logText(env);
   assert.match(log, /FASTFIELD_SUBSCRIPTION_KEY \(Azure gateway key\): present, 32 characters, masked 0123\.\.\.cdef, 32-character hex: true/);
-  assert.ok(log.indexOf('FASTFIELD_SUBSCRIPTION_KEY') < log.indexOf('Step 1 of 3'), 'settings summary comes first');
+  assert.ok(log.indexOf('FASTFIELD_SUBSCRIPTION_KEY') < log.indexOf('Step 1 of 4'), 'settings summary comes first');
   assert.match(log, new RegExp('FASTFIELD_USER_ID .*: ' + USER.replace('.', '\\.')));
   assert.match(log, new RegExp('FASTFIELD_PASSWORD: present \\(' + [...PASSWORD].length + ' characters\\)'));
   noSecrets(env);
@@ -782,86 +789,234 @@ test('dispatch: the address is the singular /v3/dispatch, built from the v3 base
   assert.equal(config.FASTFIELD_DISPATCH_URL, 'https://api.fastfieldforms.com/services/v3/dispatch');
   assert.equal(config.FASTFIELD_FORMS_URL, 'https://api.fastfieldforms.com/services/v3/forms');
   assert.equal(config.FASTFIELD_AUTH_URL, 'https://api.fastfieldforms.com/services/v3/authenticate');
-  assert.equal(config.FASTFIELD_TASKS_URL, 'https://api.fastfieldforms.com/services/v3/tasks');
+  assert.equal(config.FASTFIELD_USERS_URL, 'https://api.fastfieldforms.com/services/v3/users');
+  assert.equal(config.FASTFIELD_TASKS_URL, undefined, 'the route probe is gone');
   const plural = configure(makeContext());
   plural.ctx.dispatchToFastField_({ call_id: 'J', outcome: 1 });
   assert.ok(plural.fetchCalls.every((c) => !c.url.endsWith('/dispatches')), 'the plural path is never used');
   assert.equal(dispatches(plural).length, 1);
 });
 
-test('route discovery: a 404 on /dispatch tries /forms/{id}/dispatch, then /tasks, logging each status and body', () => {
+// --- user discovery and the recipient ---------------------------------------
+
+const NO_RECIPIENT = { code: 404, body: '{"message":"Recipient User or User Group not found","Code":404}' };
+const NO_ROUTE = { code: 404, body: '{"statusCode":404,"message":"Resource not found"}' };
+
+/** The recipient fields of every dispatch request, in order. */
+const recipients = (env) => dispatches(env).map((c) => {
+  const p = JSON.parse(c.options.payload);
+  return { users: p.users, userIds: p.userIds, userEmail: p.userEmail };
+});
+
+test('recipient: dispatches name the login email in `users` by default', () => {
   const env = configure(makeContext());
-  const body404 = '{"statusCode":404,"message":"Resource not found"}';
-  env.fetcher.respond = (url) => {
-    if (url === FORMS_URL) return { code: 200, body: JSON.stringify(FORMS) };
-    return { code: 404, body: body404 };
-  };
-  env.ctx.testFastFieldDispatch();
-  const posts = env.fetchCalls.filter((c) => c.options.method === 'post' && c.url !== AUTH_URL).map((c) => c.url);
-  assert.deepEqual(posts, [FF_URL, FORM_DISPATCH_URL, TASKS_URL], 'primary first, then the two alternatives in order');
-  const log = logText(env);
-  assert.match(log, /HTTP status: 404/);
-  assert.match(log, /POST https:\/\/api\.fastfieldforms\.com\/services\/v3\/forms\/98765\/dispatch: HTTP 404 \{"statusCode":404,"message":"Resource not found"\}/);
-  assert.match(log, /POST https:\/\/api\.fastfieldforms\.com\/services\/v3\/tasks: HTTP 404 \{"statusCode":404/);
-  assert.match(log, /Every route was a 404/);
-  // the alternatives carry the same session, keys and body
-  const [, , forms2, tasks] = env.fetchCalls.slice(-4);
-  for (const call of [forms2, tasks]) {
-    assertSessionHeaders(call);
-    assert.equal(JSON.parse(call.options.payload).mergeFields.alpha_1, 'TEST-DISPATCH-001');
+  env.ctx.dispatchToFastField_({ call_id: 'J', outcome: 1 });
+  const payload = JSON.parse(dispatches(env)[0].options.payload);
+  assert.deepEqual(payload.users, [USER]);
+  assert.equal(payload.userIds, undefined);
+  assert.equal(payload.userEmail, undefined);
+});
+
+test('recipient: FASTFIELD_RECIPIENT_ID replaces the email, and FASTFIELD_RECIPIENT_FIELD picks the field', () => {
+  const cases = [
+    [{ FASTFIELD_RECIPIENT_ID: ' "5002" ' }, { users: ['5002'] }],
+    [{ FASTFIELD_RECIPIENT_ID: '5002', FASTFIELD_RECIPIENT_FIELD: 'userIds' }, { userIds: ['5002'] }],
+    [{ FASTFIELD_RECIPIENT_FIELD: 'userEmail' }, { userEmail: USER }],
+    [{ FASTFIELD_RECIPIENT_FIELD: 'userEmail', FASTFIELD_RECIPIENT_ID: 'other@x.example' }, { userEmail: 'other@x.example' }],
+    [{ FASTFIELD_RECIPIENT_FIELD: 'bogus' }, { users: [USER] }],
+  ];
+  for (const [props, expected] of cases) {
+    const env = configure(makeContext());
+    Object.assign(env.props, props);
+    env.ctx.dispatchToFastField_({ call_id: 'J', outcome: 1 });
+    const payload = JSON.parse(dispatches(env)[0].options.payload);
+    const got = { users: payload.users, userIds: payload.userIds, userEmail: payload.userEmail };
+    for (const key of ['users', 'userIds', 'userEmail']) {
+      assert.deepEqual(got[key], expected[key], JSON.stringify(props) + ' ' + key);
+    }
+    assert.equal(payload.autoCreateUsers, false);
+    assert.equal(payload.formId, 98765);
   }
+});
+
+test('404: the dispatch address is final; a 404 never triggers route probing', () => {
+  for (const answer of [NO_ROUTE, NO_RECIPIENT, { code: 404, body: 'x' }]) {
+    const env = configure(makeContext());
+    fastFieldServer(env, { dispatch: answer });
+    env.ctx.testFastFieldDispatch();
+    assert.ok(!env.fetchCalls.some((c) => /\/tasks$|\/forms\/\d+\/dispatch$/.test(c.url)), 'no route probes');
+    assert.equal(dispatches(env).length >= 1, true);
+  }
+});
+
+test('404: an Azure gateway 404 is described as a missing route, an application 404 as FastField\'s own answer', () => {
+  const route = configure(makeContext());
+  fastFieldServer(route, { dispatch: NO_ROUTE });
+  route.ctx.testFastFieldDispatch();
+  assert.match(logText(route), /Azure gateway has no such route[\s\S]*Resource not found/);
+  assert.equal(dispatches(route).length, 1, 'one attempt only');
+
+  const app = configure(makeContext());
+  fastFieldServer(app, { dispatch: NO_RECIPIENT });
+  app.ctx.testFastFieldDispatch();
+  assert.match(logText(app), /FastField's own server answered \(the route is right\) but there is no such recipient/);
+});
+
+test('users: step 3 lists the account\'s users with id, email, role and groups, and finds the login by email', () => {
+  const env = configure(makeContext());
+  env.props.FASTFIELD_USER_ID = 'driver@recoverytowing.example';
+  fastFieldServer(env);
+  env.ctx.testFastFieldDispatch();
+  const usersCall = calls(env, USERS_URL)[0];
+  assert.equal(usersCall.options.method, 'get');
+  assertSessionHeaders(usersCall);
+  const log = logText(env);
+  assert.match(log, /Step 3 of 4[\s\S]*GET https:\/\/api\.fastfieldforms\.com\/services\/v3\/users/);
+  assert.match(log, /Users this account can see \(2\):/);
+  assert.match(log, /id: 5001 \| email: owner@recoverytowing\.example \| role: Administrator \| groups: \(none\)/);
+  assert.match(log, /id: 5002 \| email: Driver@RecoveryTowing\.example \| role: Mobile User \| groups: Drivers; Night shift/);
+  assert.match(log, /Found driver@recoverytowing\.example as user id 5002/, 'matched without regard to case');
+  assert.ok(log.indexOf('Step 3 of 4') < log.indexOf('Step 4 of 4'), 'before the dispatch');
   noSecrets(env);
 });
 
-test('route discovery: stops at the first route that is not a 404, so no extra test task is created', () => {
-  const accepted = configure(makeContext());
-  accepted.fetcher.respond = (url) => {
-    if (url === FORMS_URL) return { code: 200, body: JSON.stringify(FORMS) };
-    if (url === FORM_DISPATCH_URL) return { code: 201, body: JSON.stringify({ id: 'T-31' }) };
-    return { code: 404, body: '{"message":"Resource not found"}' };
-  };
-  accepted.ctx.testFastFieldDispatch();
-  assert.ok(!accepted.fetchCalls.some((c) => c.url === TASKS_URL), 'did not go on to /tasks');
-  assert.match(logText(accepted), /gateway ACCEPTED https:\/\/api\.fastfieldforms\.com\/services\/v3\/forms\/98765\/dispatch \(task T-31 created/);
-
-  const known = configure(makeContext());
-  known.fetcher.respond = (url) => {
-    if (url === FORMS_URL) return { code: 200, body: JSON.stringify(FORMS) };
-    if (url === FORM_DISPATCH_URL) return { code: 404, body: '{"message":"Resource not found"}' };
-    if (url === TASKS_URL) return { code: 422, body: '{"message":"users is required"}' };
-    return { code: 404, body: '{"message":"Resource not found"}' };
-  };
-  known.ctx.testFastFieldDispatch();
-  assert.match(logText(known), /gateway KNOWS https:\/\/api\.fastfieldforms\.com\/services\/v3\/tasks \(HTTP 422, not 404\)[\s\S]*users is required/);
+test('users: other field names and wrapped lists are understood', () => {
+  const env = configure(makeContext());
+  fastFieldServer(env, { users: { code: 200, body: JSON.stringify({ users: [
+    { userId: 'a1b2-uuid', emailAddress: USER, roles: ['Admin', 'Dispatcher'], userGroups: ['Fleet'] },
+  ] }) } });
+  env.ctx.testFastFieldDispatch();
+  assert.match(logText(env), /id: a1b2-uuid \| email: driver@recoverytowing\.example \| role: Admin; Dispatcher \| groups: Fleet/);
+  assert.match(logText(env), /as user id a1b2-uuid/);
 });
 
-test('route discovery: runs only after a 404 on the primary route, never on other answers', () => {
-  for (const code of [201, 400, 401, 403, 500]) {
+test('users: no matching user, an unreadable list and a failed request are logged, and the dispatch still runs', () => {
+  const none = configure(makeContext());
+  fastFieldServer(none, { users: { code: 200, body: JSON.stringify([USERS[0]]) } });
+  none.ctx.testFastFieldDispatch();
+  assert.match(logText(none), /No user has the email FASTFIELD_USER_ID \(driver@recoverytowing\.example\)/);
+  assert.equal(dispatches(none).length, 1);
+
+  const odd = configure(makeContext());
+  fastFieldServer(odd, { users: { code: 200, body: '<html>' } });
+  odd.ctx.testFastFieldDispatch();
+  assert.match(logText(odd), /users reply was not a list I recognize/);
+  assert.equal(dispatches(odd).length, 1);
+
+  const denied = configure(makeContext());
+  fastFieldServer(denied, { users: { code: 403, body: '{"message":"Forbidden"}' } });
+  denied.ctx.testFastFieldDispatch();
+  assert.match(logText(denied), /HTTP status: 403[\s\S]*Could not list users \(continuing\)[\s\S]*Forbidden/);
+  assert.equal(dispatches(denied).length, 1);
+
+  const down = configure(makeContext());
+  down.fetcher.respond = (url) => (url === USERS_URL ? new Error('socket closed')
+    : url === FORMS_URL ? { code: 200, body: JSON.stringify(FORMS) } : { code: 201, body: '{"dispatchId":"T-1"}' });
+  down.ctx.testFastFieldDispatch();
+  assert.match(logText(down), /Users request failed before FastField answered: socket closed/);
+  assert.equal(dispatches(down).length, 1);
+});
+
+test('recipient formats: after "Recipient not found", the user id is tried in `users`, then `userIds`, then the email in `userEmail`', () => {
+  const env = configure(makeContext());
+  env.props.FASTFIELD_USER_ID = 'driver@recoverytowing.example';
+  fastFieldServer(env, { dispatch: NO_RECIPIENT });
+  env.ctx.testFastFieldDispatch();
+  assert.deepEqual(recipients(env), [
+    { users: [USER], userIds: undefined, userEmail: undefined },
+    { users: ['5002'], userIds: undefined, userEmail: undefined },
+    { users: undefined, userIds: ['5002'], userEmail: undefined },
+    { users: undefined, userIds: undefined, userEmail: USER },
+    { users: undefined, userIds: [USER], userEmail: undefined },
+  ]);
+  dispatches(env).forEach((c) => assertSessionHeaders(c));
+  const log = logText(env);
+  assert.match(log, /Trying other ways to name them/);
+  assert.match(log, /users: \[user id 5002\]: HTTP 404 \{"message":"Recipient User or User Group not found","Code":404\}/);
+  assert.match(log, /userIds: \[user id 5002\]: HTTP 404/);
+  assert.match(log, /userEmail: <email>: HTTP 404/);
+  assert.match(log, /No way of naming the recipient was accepted/);
+});
+
+test('recipient formats: stops at the first accepted one and says which settings to use', () => {
+  const env = configure(makeContext());
+  env.props.FASTFIELD_USER_ID = 'driver@recoverytowing.example';
+  env.fetcher.respond = (url, options) => {
+    if (url === FORMS_URL) return { code: 200, body: JSON.stringify(FORMS) };
+    if (url === USERS_URL) return { code: 200, body: JSON.stringify(USERS) };
+    const p = JSON.parse(options.payload);
+    return p.userIds && p.userIds[0] === '5002' ? { code: 201, body: JSON.stringify({ dispatchId: 'T-88' }) } : NO_RECIPIENT;
+  };
+  env.ctx.testFastFieldDispatch();
+  assert.equal(dispatches(env).length, 3, 'email, id in users, id in userIds; then it stopped');
+  const log = logText(env);
+  assert.match(log, /ACCEPTED with userIds: \[user id 5002\] \(task T-88 created/);
+  assert.match(log, /set in Script Properties: FASTFIELD_RECIPIENT_ID = 5002 and FASTFIELD_RECIPIENT_FIELD = userIds/);
+
+  const idInUsers = configure(makeContext());
+  idInUsers.props.FASTFIELD_USER_ID = 'driver@recoverytowing.example';
+  idInUsers.fetcher.respond = (url, options) => {
+    if (url === FORMS_URL) return { code: 200, body: JSON.stringify(FORMS) };
+    if (url === USERS_URL) return { code: 200, body: JSON.stringify(USERS) };
+    return JSON.parse(options.payload).users[0] === '5002' ? { code: 200, body: '{"id":"T-89"}' } : NO_RECIPIENT;
+  };
+  idInUsers.ctx.testFastFieldDispatch();
+  assert.match(logText(idInUsers), /ACCEPTED with users: \[user id 5002\][\s\S]*FASTFIELD_RECIPIENT_ID = 5002\./);
+  assert.ok(!/FASTFIELD_RECIPIENT_FIELD/.test(logText(idInUsers).split('ACCEPTED')[1]), 'the field stays `users`');
+});
+
+test('recipient formats: a different error means the recipient was accepted and something else was wrong', () => {
+  const env = configure(makeContext());
+  env.props.FASTFIELD_USER_ID = 'driver@recoverytowing.example';
+  env.fetcher.respond = (url, options) => {
+    if (url === FORMS_URL) return { code: 200, body: JSON.stringify(FORMS) };
+    if (url === USERS_URL) return { code: 200, body: JSON.stringify(USERS) };
+    return JSON.parse(options.payload).users[0] === '5002'
+      ? { code: 400, body: JSON.stringify({ message: 'mergeFields.alpha_9 is invalid' }) } : NO_RECIPIENT;
+  };
+  env.ctx.testFastFieldDispatch();
+  assert.equal(dispatches(env).length, 2);
+  assert.match(logText(env), /accepted users: \[user id 5002\] as a recipient and rejected something else\. Its message: message: mergeFields\.alpha_9 is invalid/);
+  assert.match(logText(env), /Likely recipient settings: FASTFIELD_RECIPIENT_ID = 5002/);
+});
+
+test('recipient formats: without a matching user, only the email formats are tried; a configured id is not repeated', () => {
+  const none = configure(makeContext());
+  fastFieldServer(none, { users: { code: 200, body: JSON.stringify([USERS[0]]) }, dispatch: NO_RECIPIENT });
+  none.ctx.testFastFieldDispatch();
+  assert.deepEqual(recipients(none), [
+    { users: [USER], userIds: undefined, userEmail: undefined },
+    { users: undefined, userIds: undefined, userEmail: USER },
+    { users: undefined, userIds: [USER], userEmail: undefined },
+  ]);
+
+  const configured = configure(makeContext());
+  configured.props.FASTFIELD_USER_ID = 'driver@recoverytowing.example';
+  configured.props.FASTFIELD_RECIPIENT_ID = '5002';
+  fastFieldServer(configured, { dispatch: NO_RECIPIENT });
+  configured.ctx.testFastFieldDispatch();
+  const got = recipients(configured);
+  assert.deepEqual(got[0], { users: ['5002'], userIds: undefined, userEmail: undefined }, 'the configured id goes first');
+  assert.equal(got.filter((r) => r.users && r.users[0] === '5002').length, 1, 'and is not tried twice');
+});
+
+test('recipient formats: only a "recipient not found" 404 starts them', () => {
+  for (const answer of [{ code: 201, body: '{"dispatchId":"T-1"}' }, NO_ROUTE, { code: 400, body: '{"message":"bad"}' }, { code: 401, body: '{}' }, { code: 500, body: 'x' }]) {
     const env = configure(makeContext());
-    fastFieldServer(env, { dispatch: { code, body: '{"message":"x"}' } });
+    fastFieldServer(env, { dispatch: answer });
     env.ctx.testFastFieldDispatch();
-    assert.ok(!env.fetchCalls.some((c) => c.url === FORM_DISPATCH_URL || c.url === TASKS_URL), String(code));
+    assert.equal(dispatches(env).length, 1, String(answer.code));
+    assert.ok(!logText(env).includes('Trying other ways'));
   }
 });
 
-test('route discovery: a network failure on an alternative is logged and the next one is tried', () => {
+test('recipient formats: a real app sync uses only the configured recipient, never the experiments', () => {
   const env = configure(makeContext());
-  env.fetcher.respond = (url) => {
-    if (url === FORMS_URL) return { code: 200, body: JSON.stringify(FORMS) };
-    if (url === FORM_DISPATCH_URL) return new Error('socket closed');
-    return { code: 404, body: '{}' };
-  };
-  env.ctx.testFastFieldDispatch();
-  assert.match(logText(env), /forms\/98765\/dispatch: request failed \(socket closed\)/);
-  assert.ok(env.fetchCalls.some((c) => c.url === TASKS_URL));
-});
-
-test('route discovery: a real app sync never probes other routes', () => {
-  const env = configure(makeContext());
-  env.fetcher.respond = () => ({ code: 404, body: '{"message":"Resource not found"}' });
+  env.fetcher.respond = () => NO_RECIPIENT;
   const res = post(env, appPayload());
   assert.equal(res.ok, true);
-  assert.deepEqual(env.fetchCalls.filter((c) => c.url !== AUTH_URL).map((c) => c.url), [FF_URL]);
+  assert.equal(dispatches(env).length, 1);
+  assert.equal(calls(env, USERS_URL).length, 0);
   assert.equal(rowObj(env, res.row).FastField_Task_ID, '');
 });
 
