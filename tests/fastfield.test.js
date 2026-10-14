@@ -17,6 +17,7 @@ const WON = '1 - Won / Booked';
 const LOST = '0 - Lost / Declined';
 const FF_URL = 'https://api.fastfieldforms.com/services/v3/dispatch';
 const USERS_URL = 'https://api.fastfieldforms.com/services/v3/users';
+const GROUPS_URL = 'https://api.fastfieldforms.com/services/v3/usergroups';
 const FORMS_URL = 'https://api.fastfieldforms.com/services/v3/forms';
 const AUTH_URL = 'https://api.fastfieldforms.com/services/v3/authenticate';
 const SESSION_KEY = 'fastfield_session_token';
@@ -473,7 +474,7 @@ test('sign-in request: every FastField request after it carries the same subscri
   const env = configure(makeContext());
   fastFieldServer(env);
   env.ctx.testFastFieldDispatch();
-  assert.equal(env.fetchCalls.length, 4);
+  assert.equal(env.fetchCalls.length, 5);
   env.fetchCalls.forEach((c) => {
     assert.equal(c.options.headers['Ocp-Apim-Subscription-Key'], SUB, c.url);
     assert.equal(c.options.headers['FastField-API-Key'], SUB, c.url);
@@ -482,6 +483,7 @@ test('sign-in request: every FastField request after it carries the same subscri
   assert.equal(env.fetchCalls[1].options.headers['X-Gatekeeper-SessionToken'], TOKEN);
   assert.equal(env.fetchCalls[2].options.headers['X-Gatekeeper-SessionToken'], TOKEN);
   assert.equal(env.fetchCalls[3].options.headers['X-Gatekeeper-SessionToken'], TOKEN);
+  assert.equal(env.fetchCalls[4].options.headers['X-Gatekeeper-SessionToken'], TOKEN);
 });
 
 test('sign-in request: an exception that mentions a secret is redacted before it is logged', () => {
@@ -587,6 +589,7 @@ function fastFieldServer(env, { forms = { code: 200, body: JSON.stringify(FORMS)
   env.fetcher.respond = (url) => {
     if (url === FORMS_URL) return forms;
     if (url === USERS_URL) return users;
+    if (url === GROUPS_URL) return { code: 200, body: '[]' };
     return dispatch || { code: 201, body: JSON.stringify({ dispatchId: 'T-55' }), headers: { 'X-Req': 'abc' } };
   };
 }
@@ -603,13 +606,14 @@ test('testFastFieldDispatch: signs in, checks the forms with the session, then s
   const result = env.ctx.testFastFieldDispatch();
   assert.deepEqual(JSON.parse(JSON.stringify(result)), { dispatchId: 'T-55' });
 
-  assert.deepEqual(env.fetchCalls.map((c) => c.url), [AUTH_URL, FORMS_URL, USERS_URL, FF_URL], 'four steps, in order');
+  assert.deepEqual(env.fetchCalls.map((c) => c.url), [AUTH_URL, FORMS_URL, USERS_URL, GROUPS_URL, FF_URL], 'four steps, in order');
   assert.equal(env.fetchCalls[0].options.headers.Authorization, basic(USER, PASSWORD));
   assert.equal(env.fetchCalls[1].options.method, 'get');
   assertSessionHeaders(env.fetchCalls[1]);
   assertSessionHeaders(env.fetchCalls[2]);
   assertSessionHeaders(env.fetchCalls[3]);
-  const sent = JSON.parse(env.fetchCalls[3].options.payload);
+  assertSessionHeaders(env.fetchCalls[4]);
+  const sent = JSON.parse(env.fetchCalls[4].options.payload);
   assert.deepEqual(sent.users, [USER]);
   assert.equal(sent.autoCreateUsers, false);
   assert.equal(sent.mergeFields.alpha_1, 'TEST-DISPATCH-001');
@@ -922,7 +926,7 @@ test('recipient formats: after "Recipient not found", the user id is tried in `u
   env.props.FASTFIELD_USER_ID = 'driver@recoverytowing.example';
   fastFieldServer(env, { dispatch: NO_RECIPIENT });
   env.ctx.testFastFieldDispatch();
-  assert.deepEqual(recipients(env), [
+  assert.deepEqual(recipients(env).slice(0, 5), [
     { users: [USER], userIds: undefined, userEmail: undefined },
     { users: ['5002'], userIds: undefined, userEmail: undefined },
     { users: undefined, userIds: ['5002'], userEmail: undefined },
@@ -931,7 +935,7 @@ test('recipient formats: after "Recipient not found", the user id is tried in `u
   ]);
   dispatches(env).forEach((c) => assertSessionHeaders(c));
   const log = logText(env);
-  assert.match(log, /Trying other ways to name them/);
+  assert.match(log, /Trying \d+ other ways to name them/);
   assert.match(log, /users: \[user id 5002\]: HTTP 404 \{"message":"Recipient User or User Group not found","Code":404\}/);
   assert.match(log, /userIds: \[user id 5002\]: HTTP 404/);
   assert.match(log, /userEmail: <email>: HTTP 404/);
@@ -984,7 +988,7 @@ test('recipient formats: without a matching user, only the email formats are tri
   const none = configure(makeContext());
   fastFieldServer(none, { users: { code: 200, body: JSON.stringify([USERS[0]]) }, dispatch: NO_RECIPIENT });
   none.ctx.testFastFieldDispatch();
-  assert.deepEqual(recipients(none), [
+  assert.deepEqual(recipients(none).slice(0, 3), [
     { users: [USER], userIds: undefined, userEmail: undefined },
     { users: undefined, userIds: undefined, userEmail: USER },
     { users: undefined, userIds: [USER], userEmail: undefined },
@@ -1158,12 +1162,13 @@ test('diagnostic route: a valid token runs the chain and returns the structured 
     ['POST', AUTH_URL, 200],
     ['GET', FORMS_URL, 200],
     ['GET', USERS_URL, 200],
+    ['GET', GROUPS_URL, 200],
     ['POST', FF_URL, 201],
   ]);
   assert.deepEqual(report.requests[1].body, FORMS);
   assert.deepEqual(report.requests[2].body, USERS, 'the users, for finding the recipient');
-  assert.deepEqual(report.requests[3].body, { dispatchId: 'T-55' });
-  assert.equal(report.requests[3].responseHeaders['X-Req'], 'abc');
+  assert.deepEqual(report.requests[4].body, { dispatchId: 'T-55' });
+  assert.equal(report.requests[4].responseHeaders['X-Req'], 'abc');
   assert.ok(Array.isArray(report.log) && report.log.length > 8);
   assert.match(report.log.join('\n'), /Step 1 of 4[\s\S]*Step 2 of 4[\s\S]*Step 3 of 4[\s\S]*Step 4 of 4[\s\S]*OK\. FastField created task T-55/);
   assert.match(report.log.join('\n'), /Found driver@recoverytowing\.example|No user has the email/);
@@ -1176,7 +1181,7 @@ test('diagnostic route: no secret appears anywhere in the report', () => {
   for (const secret of [PASSWORD, SUB, TOKEN, API_SECRET, 'SECRETCOOKIE']) assert.ok(!raw.includes(secret), 'leaked: ' + secret.slice(0, 6));
   const report = JSON.parse(raw);
   assert.equal(report.requests[0].body.sessionToken, '0f1e...e1f0', 'the session token is masked');
-  assert.equal(report.requests[3].responseHeaders['Set-Cookie'], '[hidden]');
+  assert.equal(report.requests[4].responseHeaders['Set-Cookie'], '[hidden]');
 });
 
 test('diagnostic route: failures are reported, not thrown, and show the status and reply', () => {
@@ -1221,16 +1226,16 @@ test('diagnostic route: the report collector is cleared afterwards, and a second
   const env = configure(makeContext());
   fastFieldServer(env);
   const first = get(env, DIAG);
-  assert.equal(first.requests.length, 4);
+  assert.equal(first.requests.length, 5);
   const second = get(env, DIAG);
   // the cached session is reused, so there is no sign-in; and nothing from the first run is carried over
-  assert.deepEqual(second.requests.map((r) => r.url), [FORMS_URL, USERS_URL, FF_URL]);
+  assert.deepEqual(second.requests.map((r) => r.url), [FORMS_URL, USERS_URL, GROUPS_URL, FF_URL]);
   assert.equal(second.log.filter((l) => l.startsWith('Step 1 of 4')).length, 1);
   assert.match(second.log.join('\n'), /Session token \(from a cached session\)/);
   // a run outside the route (as from the editor) leaves nothing behind for a later report
   env.ctx.testFastFieldDispatch();
   const third = get(env, DIAG);
-  assert.deepEqual(third.requests.map((r) => r.url), [FORMS_URL, USERS_URL, FF_URL]);
+  assert.deepEqual(third.requests.map((r) => r.url), [FORMS_URL, USERS_URL, GROUPS_URL, FF_URL]);
 });
 
 test('diagnostic route: the health check and the location page are unchanged', () => {
@@ -1375,4 +1380,97 @@ test('ensureSchema_: any other missing header is still a configuration error', (
   const env = makeContext();
   env.sheet.data[0][4] = 'Payer_Nme';
   assert.throws(() => env.ctx.ensureSchema_(env.sheet), /Payer_Name/);
+});
+
+// ---- expanded recipient matrix, usergroups probe, production guard ----
+
+const bodies = (env) => dispatches(env).map((c) => JSON.parse(c.options.payload));
+
+test('recipient matrix: every candidate shape is tried in order, with the same merge fields', () => {
+  const env = configure(makeContext());
+  env.props.FASTFIELD_USER_ID = 'driver@recoverytowing.example';
+  fastFieldServer(env, { dispatch: NO_RECIPIENT });
+  env.ctx.testFastFieldDispatch();
+  const all = bodies(env);
+  assert.equal(all.length, 15, 'the first send plus 14 other ways');
+  const shape = (b) => {
+    const copy = JSON.parse(JSON.stringify(b));
+    delete copy.mergeFields; delete copy.MergeFields; delete copy.autoCreateUsers;
+    return copy;
+  };
+  const E = 'driver@recoverytowing.example';
+  assert.deepEqual(all.slice(5).map(shape), [
+    { formId: 98765, users: [{ userId: 5002 }] },
+    { formId: 98765, users: [{ email: E }] },
+    { formId: 98765, assignedUserId: 5002 },
+    { formId: 98765, assignedUsers: [5002] },
+    { formId: 98765, assignedTo: E },
+    { formId: 98765, recipients: [5002] },
+    { formId: 98765, recipients: [E] },
+    { formId: 98765, recipients: [{ userId: 5002 }] },
+    { FormId: 98765, Users: [5002] },
+    { FormId: 98765, AssignedUserId: 5002 },
+  ]);
+  all.slice(5).forEach((b) => assert.equal((b.mergeFields || b.MergeFields).alpha_1, 'TEST-DISPATCH-001'));
+  all.forEach((b, i) => assertSessionHeaders(dispatches(env)[i]));
+  assert.match(logText(env), /No way of naming the recipient was accepted/);
+  noSecrets(env);
+});
+
+test('recipient matrix: stops at the first HTTP 200/201 and logs the winning payload schema', () => {
+  const env = configure(makeContext());
+  env.props.FASTFIELD_USER_ID = 'driver@recoverytowing.example';
+  env.fetcher.respond = (url, options) => {
+    if (url === FORMS_URL) return { code: 200, body: JSON.stringify(FORMS) };
+    if (url === USERS_URL) return { code: 200, body: JSON.stringify(USERS) };
+    if (url === GROUPS_URL) return { code: 200, body: '[]' };
+    const b = JSON.parse(options.payload);
+    return b.recipients && typeof b.recipients[0] === 'number' ? { code: 201, body: '{"dispatchId":"T-99"}' } : NO_RECIPIENT;
+  };
+  env.ctx.testFastFieldDispatch();
+  assert.equal(bodies(env).length, 11, 'it stopped at recipients: [user id]');
+  const log = logText(env);
+  assert.match(log, /ACCEPTED with recipients: \[user id\] \(task T-99 created/);
+  assert.match(log, /Winning payload schema: \{"formId":98765,"mergeFields":"<mergeFields>","recipients":\[5002\]\}/);
+  assert.match(log, /not one dispatches send yet/);
+});
+
+test('recipient matrix: the winning schema never shows the email', () => {
+  const env = configure(makeContext());
+  env.props.FASTFIELD_USER_ID = 'driver@recoverytowing.example';
+  env.fetcher.respond = (url, options) => {
+    if (url === FORMS_URL) return { code: 200, body: JSON.stringify(FORMS) };
+    if (url === USERS_URL) return { code: 200, body: JSON.stringify(USERS) };
+    if (url === GROUPS_URL) return { code: 200, body: '[]' };
+    return JSON.parse(options.payload).assignedTo ? { code: 200, body: '{"id":"T-7"}' } : NO_RECIPIENT;
+  };
+  env.ctx.testFastFieldDispatch();
+  assert.match(logText(env), /Winning payload schema: \{"formId":98765,"mergeFields":"<mergeFields>","assignedTo":"<email>"\}/);
+});
+
+test('step 3: the usergroups are listed with the session headers, and a failure does not stop the test', () => {
+  const env = configure(makeContext());
+  fastFieldServer(env);
+  env.ctx.testFastFieldDispatch();
+  const g = calls(env, GROUPS_URL);
+  assert.equal(g.length, 1);
+  assert.equal(g[0].options.method, 'get');
+  assertSessionHeaders(g[0]);
+  assert.match(logText(env), /User groups \(GET .*usergroups\): HTTP 200/);
+
+  const bad = configure(makeContext());
+  bad.fetcher.respond = (url) => (url === GROUPS_URL ? new Error('socket closed')
+    : url === FORMS_URL ? { code: 200, body: JSON.stringify(FORMS) }
+      : url === USERS_URL ? { code: 200, body: JSON.stringify(USERS) } : { code: 201, body: '{"dispatchId":"T-1"}' });
+  bad.ctx.testFastFieldDispatch();
+  assert.match(logText(bad), /User groups .*request failed \(socket closed\)/);
+  assert.equal(dispatches(bad).length, 1);
+});
+
+test('production guard: a crash while dispatching a live call is swallowed and logged without secrets', () => {
+  const env = configure(makeContext());
+  env.fetcher.respond = () => { throw new Error('boom ' + SUB); };
+  const id = env.ctx.dispatchToFastField_({ call_id: 'C-1', outcome: 'Won', customer_phone: '1' });
+  assert.equal(id, null);
+  assert.ok(!env.logs.error.join('\n').includes(SUB));
 });

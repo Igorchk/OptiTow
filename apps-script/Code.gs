@@ -57,6 +57,7 @@ const CONFIG = Object.freeze({
   FASTFIELD_FORMS_URL: FASTFIELD_API_BASE + '/forms',
   FASTFIELD_AUTH_URL: FASTFIELD_API_BASE + '/authenticate',
   FASTFIELD_USERS_URL: FASTFIELD_API_BASE + '/users',
+  FASTFIELD_USERGROUPS_URL: FASTFIELD_API_BASE + '/usergroups',
   // The login session token is cached for at most this long (the longest CacheService allows), and
   // for less if FastField says it expires sooner.
   FASTFIELD_SESSION_TTL_SECONDS: 21600,
@@ -1369,7 +1370,15 @@ function postFastFieldDispatch_(subscriptionKey, sessionToken, payload, url) {
  * either way, so nothing here throws.
  */
 function dispatchToFastField_(callData) {
-  const result = sendFastFieldDispatch_(callData);
+  let result;
+  try {
+    result = sendFastFieldDispatch_(callData);
+  } catch (err) {
+    // Guard: whatever goes wrong here must never stop the call from being saved.
+    console.error('FastField dispatch crashed: ' + redactSecrets_(String(err && err.message ? err.message : err),
+      [getScriptProperty_('FASTFIELD_SUBSCRIPTION_KEY'), getScriptProperty_('FASTFIELD_PASSWORD')]));
+    return null;
+  }
   if (!result) return null;
   if (result.error) {
     console.error('FastField dispatch error: ' + result.error);
@@ -1608,6 +1617,8 @@ function testFastFieldDispatch() {
 
   diag_('Step 3 of 4: finding the recipient (GET ' + CONFIG.FASTFIELD_USERS_URL + ')');
   const found = discoverFastFieldUser_(config, token);
+  const groups = fastFieldGet_(CONFIG.FASTFIELD_USERGROUPS_URL, getFastFieldHeaders_(config.FASTFIELD_SUBSCRIPTION_KEY, token));
+  diag_('User groups (GET ' + CONFIG.FASTFIELD_USERGROUPS_URL + '): ' + (groups.error ? 'request failed (' + groups.error + ')' : 'HTTP ' + groups.code + ' ' + groups.text.slice(0, 500)));
 
   diag_('Step 4 of 4: sending a TEST task (it will show up on the driver\'s list; delete it afterwards).');
   const testCall = {
@@ -1748,46 +1759,80 @@ function discoverFastFieldUser_(config, sessionToken) {
 function tryFastFieldRecipientFormats_(config, sessionToken, testCall, found) {
   const formId = Number(config.FASTFIELD_FORM_ID);
   const first = fastFieldRecipient_(config);
+  const email = config.FASTFIELD_USER_ID;
+  const fields = buildFastFieldPayload_(testCall, formId, first).mergeFields;
+  const userId = found && found.id ? (isFinite(Number(found.id)) ? Number(found.id) : found.id) : null;
   const candidates = [];
-  if (found && found.id) {
-    candidates.push({ field: 'users', value: found.id });
-    candidates.push({ field: 'userIds', value: found.id });
+  // A candidate: a label (the email shown as <email>), the whole body, and, for the three shapes the
+  // code can send, the recipient settings that would select it.
+  const add = function (label, payload, recipient) { candidates.push({ label: label, payload: payload, recipient: recipient }); };
+  const base = function (extra) {
+    const body = { formId: formId, mergeFields: fields };
+    Object.keys(extra).forEach(function (k) { body[k] = extra[k]; });
+    return body;
+  };
+  const pascal = function (extra) {
+    const body = { FormId: formId, MergeFields: fields };
+    Object.keys(extra).forEach(function (k) { body[k] = extra[k]; });
+    return body;
+  };
+  if (userId !== null) {
+    add('users: [user id ' + found.id + ']', buildFastFieldPayload_(testCall, formId, { field: 'users', value: found.id }), { field: 'users', value: found.id });
+    add('userIds: [user id ' + found.id + ']', buildFastFieldPayload_(testCall, formId, { field: 'userIds', value: found.id }), { field: 'userIds', value: found.id });
   }
-  candidates.push({ field: 'userEmail', value: config.FASTFIELD_USER_ID });
-  candidates.push({ field: 'userIds', value: config.FASTFIELD_USER_ID });
+  add('userEmail: <email>', buildFastFieldPayload_(testCall, formId, { field: 'userEmail', value: email }), { field: 'userEmail', value: email });
+  add('userIds: [<email>]', buildFastFieldPayload_(testCall, formId, { field: 'userIds', value: email }), { field: 'userIds', value: email });
+  // A: users as objects
+  if (userId !== null) add('users: [{userId}]', base({ users: [{ userId: userId }] }));
+  add('users: [{email}]', base({ users: [{ email: email }] }));
+  // B: assigned fields
+  if (userId !== null) {
+    add('assignedUserId: user id', base({ assignedUserId: userId }));
+    add('assignedUsers: [user id]', base({ assignedUsers: [userId] }));
+  }
+  add('assignedTo: <email>', base({ assignedTo: email }));
+  // C: recipients
+  if (userId !== null) add('recipients: [user id]', base({ recipients: [userId] }));
+  add('recipients: [<email>]', base({ recipients: [email] }));
+  if (userId !== null) add('recipients: [{userId}]', base({ recipients: [{ userId: userId }] }));
+  // D: PascalCase, as a .NET backend may bind it
+  if (userId !== null) {
+    add('PascalCase FormId/Users/MergeFields: [user id]', pascal({ Users: [userId] }));
+    add('PascalCase FormId/AssignedUserId/MergeFields: user id', pascal({ AssignedUserId: userId }));
+  }
   const seen = {};
-  seen[first.field + '=' + first.value] = true;
-  diag_('FastField did not find the recipient. Trying other ways to name them:');
+  seen[first.field + ': ' + (first.field === 'userEmail' ? '<email>' : '[' + (first.value === email ? '<email>' : 'user id ' + first.value) + ']')] = true;
+  diag_('FastField did not find the recipient. Trying ' + candidates.length + ' other ways to name them (stops at the first that is not "recipient not found"):');
   for (let i = 0; i < candidates.length; i++) {
     const c = candidates[i];
-    const key = c.field + '=' + c.value;
-    if (seen[key]) continue;
-    seen[key] = true;
-    const label = c.field + (c.field === 'userEmail' ? ': <email>' : ': [' + (c.value === config.FASTFIELD_USER_ID ? '<email>' : 'user id ' + c.value) + ']');
-    const attempt = postFastFieldDispatch_(config.FASTFIELD_SUBSCRIPTION_KEY, sessionToken,
-      buildFastFieldPayload_(testCall, formId, c), undefined);
+    if (seen[c.label]) continue;
+    seen[c.label] = true;
+    const attempt = postFastFieldDispatch_(config.FASTFIELD_SUBSCRIPTION_KEY, sessionToken, c.payload, undefined);
     if (attempt.error) {
-      diag_('  ' + label + ': request failed (' + attempt.error + ')');
+      diag_('  ' + c.label + ': request failed (' + attempt.error + ')');
       continue;
     }
-    diag_('  ' + label + ': HTTP ' + attempt.code + ' ' + attempt.text.slice(0, 1000));
+    diag_('  ' + c.label + ': HTTP ' + attempt.code + ' ' + attempt.text.slice(0, 1000));
     if (isRecipientNotFound_(attempt)) continue;
-    if (attempt.code === 200 || attempt.code === 201) {
-      diag_('ACCEPTED with ' + label + (attempt.id ? ' (task ' + attempt.id + ' created; delete it from the driver\'s list)' : '') + '.');
+    const shape = JSON.stringify(c.payload, function (k, v) { return k === 'mergeFields' || k === 'MergeFields' ? '<mergeFields>' : (v === email ? '<email>' : v); });
+    const ok = attempt.code === 200 || attempt.code === 201;
+    if (ok) {
+      diag_('ACCEPTED with ' + c.label + (attempt.id ? ' (task ' + attempt.id + ' created; delete it from the driver\'s list)' : '') + '.');
+    } else {
+      diag_('FastField gave a different answer this time (not "recipient not found"), so it accepted ' + c.label + ' as a recipient and rejected something else. Its message: ' + describeFastFieldError_(attempt));
+    }
+    diag_('Winning payload schema: ' + shape);
+    if (c.recipient) {
       const settings = [];
-      if (c.value !== config.FASTFIELD_USER_ID) settings.push('FASTFIELD_RECIPIENT_ID = ' + c.value);
-      if (c.field !== 'users') settings.push('FASTFIELD_RECIPIENT_FIELD = ' + c.field);
+      if (c.recipient.value !== email) settings.push('FASTFIELD_RECIPIENT_ID = ' + c.recipient.value);
+      if (c.recipient.field !== 'users') settings.push('FASTFIELD_RECIPIENT_FIELD = ' + c.recipient.field);
       diag_(settings.length
-        ? 'To use it for real dispatches, set in Script Properties: ' + settings.join(' and ') + '.'
+        ? (ok ? 'To use it for real dispatches, set in Script Properties: ' : 'Likely recipient settings: ') + settings.join(' and ') + '.'
         : 'This is already how dispatches name the recipient.');
     } else {
-      diag_('FastField gave a different answer this time (not "recipient not found"), so it accepted ' + label + ' as a recipient and rejected something else. Its message: ' + describeFastFieldError_(attempt));
-      const settings = [];
-      if (c.value !== config.FASTFIELD_USER_ID) settings.push('FASTFIELD_RECIPIENT_ID = ' + c.value);
-      if (c.field !== 'users') settings.push('FASTFIELD_RECIPIENT_FIELD = ' + c.field);
-      if (settings.length) diag_('Likely recipient settings: ' + settings.join(' and ') + '.');
+      diag_('This shape is not one dispatches send yet: buildFastFieldPayload_ must be changed to produce it.');
     }
-    return c;
+    return { label: c.label, payload: c.payload, status: attempt.code };
   }
   diag_('No way of naming the recipient was accepted. Check the user list above: the recipient must be a user (or user group) in this FastField account.');
   return null;
