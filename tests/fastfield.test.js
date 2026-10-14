@@ -1221,13 +1221,16 @@ test('diagnostic route: the report collector is cleared afterwards, and a second
   const env = configure(makeContext());
   fastFieldServer(env);
   const first = get(env, DIAG);
+  assert.equal(first.requests.length, 4);
   const second = get(env, DIAG);
-  assert.equal(second.requests.length, first.requests.length, 'nothing carries over from the first run');
+  // the cached session is reused, so there is no sign-in; and nothing from the first run is carried over
+  assert.deepEqual(second.requests.map((r) => r.url), [FORMS_URL, USERS_URL, FF_URL]);
   assert.equal(second.log.filter((l) => l.startsWith('Step 1 of 4')).length, 1);
-  // a run outside the route (as from the editor) collects nothing that a later report would pick up
+  assert.match(second.log.join('\n'), /Session token \(from a cached session\)/);
+  // a run outside the route (as from the editor) leaves nothing behind for a later report
   env.ctx.testFastFieldDispatch();
   const third = get(env, DIAG);
-  assert.equal(third.requests.length, first.requests.length);
+  assert.deepEqual(third.requests.map((r) => r.url), [FORMS_URL, USERS_URL, FF_URL]);
 });
 
 test('diagnostic route: the health check and the location page are unchanged', () => {
