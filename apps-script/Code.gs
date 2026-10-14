@@ -1286,7 +1286,7 @@ function redactHeaders_(headers) {
 }
 
 /**
- * GET ?action=test_fastfield&token=<API_SECRET>: runs testFastFieldDispatch and returns everything it
+ * GET ?action=test_fastfield&token=<API_SECRET>[&step=3 | &from=N&count=M]: runs testFastFieldDispatch and returns everything it
  * did as JSON: the lines it logged, and each FastField request's status, response headers and parsed
  * body. No secret appears in it (keys and the password are never logged; session tokens and cookies
  * are masked). It sends a real TEST task to FastField when the chain gets that far.
@@ -1301,7 +1301,14 @@ function fastFieldTestRoute_(params) {
   let result = null;
   let error = '';
   try {
-    result = testFastFieldDispatch();
+    const whole = function (v) { return /^\d+$/.test(String(v)) ? Number(v) : undefined; };
+    const options = {};
+    if (whole(params.step) === 3) options.stopAfterStep = 3;
+    if (whole(params.from) !== undefined) {
+      options.matrixFrom = whole(params.from);
+      options.matrixCount = whole(params.count) || 4;
+    }
+    result = testFastFieldDispatch(options);
   } catch (err) {
     error = redactSecrets_(String(err && err.message ? err.message : err),
       [getScriptProperty_('FASTFIELD_SUBSCRIPTION_KEY'), getScriptProperty_('FASTFIELD_PASSWORD'), expected]);
@@ -1548,7 +1555,8 @@ function logSecretSummary_(label, raw, value, note) {
  * It never touches the Call Log. The task is real, though: it appears on the driver's FastField
  * list, so delete it there afterwards. Returns the parsed dispatch reply, or null if it stopped.
  */
-function testFastFieldDispatch() {
+function testFastFieldDispatch(options) {
+  options = options || {};
   const config = fastFieldConfig_();
   if (!config) {
     diag_('Nothing was sent. FASTFIELD_SUBSCRIPTION_KEY, FASTFIELD_FORM_ID, FASTFIELD_USER_ID and FASTFIELD_PASSWORD (or FASTFIELD_SESSION_TOKEN_OVERRIDE) must be set in Script Properties.');
@@ -1633,6 +1641,11 @@ function testFastFieldDispatch() {
   const groups = fastFieldGet_(CONFIG.FASTFIELD_USERGROUPS_URL, getFastFieldHeaders_(config.FASTFIELD_SUBSCRIPTION_KEY, token));
   diag_('User groups (GET ' + CONFIG.FASTFIELD_USERGROUPS_URL + '): ' + (groups.error ? 'request failed (' + groups.error + ')' : 'HTTP ' + groups.code + ' ' + groups.text.slice(0, 500)));
 
+  if (options.stopAfterStep === 3) {
+    diag_('Stopped after step 3 as requested.');
+    return null;
+  }
+
   diag_('Step 4 of 4: sending a TEST task (it will show up on the driver\'s list; delete it afterwards).');
   const testCall = {
     call_id: 'TEST-DISPATCH-001',
@@ -1647,6 +1660,10 @@ function testFastFieldDispatch() {
     quoted_price: 150,
     notes_comments: 'TEST DISPATCH, safe to delete',
   };
+  if (options.matrixFrom !== undefined) {
+    diag_('Skipping the first send; trying recipient shapes ' + options.matrixFrom + ' to ' + (options.matrixFrom + options.matrixCount - 1) + ' only.');
+    return tryFastFieldRecipientFormats_(config, token, testCall, found, options.matrixFrom, options.matrixCount);
+  }
   const result = sendFastFieldDispatch_(testCall);
   if (!result) {
     diag_('Nothing was sent (see above).');
@@ -1769,7 +1786,7 @@ function discoverFastFieldUser_(config, sessionToken) {
  * `userEmail`), logging each exact status and reply, and stops at the first that FastField does not
  * answer with that same error. Whatever it accepts creates a real test task.
  */
-function tryFastFieldRecipientFormats_(config, sessionToken, testCall, found) {
+function tryFastFieldRecipientFormats_(config, sessionToken, testCall, found, from, count) {
   const formId = Number(config.FASTFIELD_FORM_ID);
   const first = fastFieldRecipient_(config);
   const email = config.FASTFIELD_USER_ID;
@@ -1820,6 +1837,7 @@ function tryFastFieldRecipientFormats_(config, sessionToken, testCall, found) {
     const c = candidates[i];
     if (seen[c.label]) continue;
     seen[c.label] = true;
+    if (from !== undefined && (i < from || i >= from + count)) continue;
     let attempt = postFastFieldDispatch_(config.FASTFIELD_SUBSCRIPTION_KEY, sessionToken, c.payload, undefined);
     // The gateway limits requests per minute: wait out a 429 and send the same shape again.
     for (let wait = 0; attempt.code === 429 && wait < 3; wait++) {

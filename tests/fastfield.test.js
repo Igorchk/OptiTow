@@ -1528,3 +1528,24 @@ test('recipient matrix: a 429 is waited out and retried, never taken for an acce
   stuck.ctx.testFastFieldDispatch();
   assert.match(logText(stuck), /Stopped: still rate limited/);
 });
+
+test('diagnostic route: step=3 stops before any task is sent', () => {
+  const env = configure(makeContext());
+  fastFieldServer(env);
+  const report = get(env, Object.assign({}, DIAG, { step: '3' }));
+  assert.equal(report.ok, true);
+  assert.equal(dispatches(env).length, 0);
+  assert.deepEqual(report.requests.map((r) => r.url), [AUTH_URL, FORMS_URL, USERS_URL, GROUPS_URL]);
+  assert.match(report.log.join('\n'), /Stopped after step 3/);
+});
+
+test('diagnostic route: from/count run only that slice of the recipient shapes, without the first send', () => {
+  const env = configure(makeContext());
+  env.props.FASTFIELD_USER_ID = 'driver@recoverytowing.example';
+  fastFieldServer(env, { dispatch: NO_RECIPIENT });
+  const report = get(env, Object.assign({}, DIAG, { from: '4', count: '2' }));
+  const sent = bodies(env);
+  assert.equal(sent.length, 2);
+  assert.deepEqual(sent.map((b) => b.recipients && Object.keys(b.recipients[0])), [['userId'], ['email']]);
+  assert.match(report.log.join('\n'), /Skipping the first send; trying recipient shapes 4 to 5 only/);
+});
