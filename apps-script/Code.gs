@@ -1791,31 +1791,9 @@ function tryFastFieldRecipientFormats_(config, sessionToken, testCall, found) {
   }
   add('userEmail: <email>', buildFastFieldPayload_(testCall, formId, { field: 'userEmail', value: email }), { field: 'userEmail', value: email });
   add('userIds: [<email>]', buildFastFieldPayload_(testCall, formId, { field: 'userIds', value: email }), { field: 'userIds', value: email });
-  // A: users as objects
-  if (userId !== null) add('users: [{userId}]', base({ users: [{ userId: userId }] }));
-  add('users: [{email}]', base({ users: [{ email: email }] }));
-  // B: assigned fields
-  if (userId !== null) {
-    add('assignedUserId: user id', base({ assignedUserId: userId }));
-    add('assignedUsers: [user id]', base({ assignedUsers: [userId] }));
-  }
-  add('assignedTo: <email>', base({ assignedTo: email }));
-  // C: recipients
-  if (userId !== null) add('recipients: [user id]', base({ recipients: [userId] }));
-  add('recipients: [<email>]', base({ recipients: [email] }));
-  if (userId !== null) add('recipients: [{userId}]', base({ recipients: [{ userId: userId }] }));
-  // FastField answered a bare id in `recipients` with a 500 about `isAnonymousDispatch`: it reads each
-  // entry as an object, so these name the user inside one.
-  if (userId !== null) {
-    add('recipients: [{userId, isAnonymousDispatch:false}]', base({ recipients: [{ userId: userId, isAnonymousDispatch: false }] }));
-    add('recipients: [{id}]', base({ recipients: [{ id: userId }] }));
-    add('recipients: [{id, isAnonymousDispatch:false}]', base({ recipients: [{ id: userId, isAnonymousDispatch: false }] }));
-    add('recipients: [{id, type:"user"}]', base({ recipients: [{ id: userId, type: 'user' }] }));
-    add('recipients: [{userId, type:"user"}]', base({ recipients: [{ userId: userId, type: 'user' }] }));
-    add('isAnonymousDispatch:false + recipients: [user id]', base({ isAnonymousDispatch: false, recipients: [userId] }));
-  }
-  add('recipients: [{email}]', base({ recipients: [{ email: email }] }));
-  add('recipients: [{email, isAnonymousDispatch:false}]', base({ recipients: [{ email: email, isAnonymousDispatch: false }] }));
+  // Tried live and answered "recipient not found" or a server error about the entry's type, so no
+  // longer sent: users as objects, assignedUserId / assignedUsers / assignedTo, bare ids in `recipients`,
+  // recipients: [{id}], and a PascalCase body (HTTP 400 "missing formId").
   // FastField read recipients: [{userId}] and [{email}] (past "recipient not found") and then asked for
   // a name, so these send one, under the keys it might use.
   if (userId !== null) add('recipients: [{userId}] + name', base({ recipients: [{ userId: userId }] }), { field: 'recipients', value: found.id });

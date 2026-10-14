@@ -1393,7 +1393,7 @@ test('recipient matrix: every candidate shape is tried in order, with the same m
   fastFieldServer(env, { dispatch: NO_RECIPIENT });
   env.ctx.testFastFieldDispatch();
   const all = bodies(env);
-  assert.equal(all.length, 30, 'the first send plus 29 other ways');
+  assert.equal(all.length, 14, 'the first send plus 13 other ways');
   const shape = (b) => {
     const copy = JSON.parse(JSON.stringify(b));
     delete copy.mergeFields; delete copy.MergeFields; delete copy.autoCreateUsers; delete copy.name;
@@ -1401,22 +1401,6 @@ test('recipient matrix: every candidate shape is tried in order, with the same m
   };
   const E = 'driver@recoverytowing.example';
   assert.deepEqual(all.slice(5).map(shape), [
-    { formId: 98765, users: [{ userId: 5002 }] },
-    { formId: 98765, users: [{ email: E }] },
-    { formId: 98765, assignedUserId: 5002 },
-    { formId: 98765, assignedUsers: [5002] },
-    { formId: 98765, assignedTo: E },
-    { formId: 98765, recipients: [5002] },
-    { formId: 98765, recipients: [E] },
-    { formId: 98765, recipients: [{ userId: 5002 }] },
-    { formId: 98765, recipients: [{ userId: 5002, isAnonymousDispatch: false }] },
-    { formId: 98765, recipients: [{ id: 5002 }] },
-    { formId: 98765, recipients: [{ id: 5002, isAnonymousDispatch: false }] },
-    { formId: 98765, recipients: [{ id: 5002, type: 'user' }] },
-    { formId: 98765, recipients: [{ userId: 5002, type: 'user' }] },
-    { formId: 98765, isAnonymousDispatch: false, recipients: [5002] },
-    { formId: 98765, recipients: [{ email: E }] },
-    { formId: 98765, recipients: [{ email: E, isAnonymousDispatch: false }] },
     { formId: 98765, recipients: [{ userId: 5002 }] },
     { formId: 98765, recipients: [{ email: E }] },
     { formId: 98765, dispatchName: 'Tow - 2022 Honda Civic - TEST-DISPATCH-001', recipients: [{ userId: 5002 }] },
@@ -1427,9 +1411,9 @@ test('recipient matrix: every candidate shape is tried in order, with the same m
     { formId: 98765, recipients: [{ userId: 5002 }] },
     { formId: 98765, recipients: [{ email: E }] },
   ]);
-  all.slice(5, 26).forEach((b) => assert.equal(b.mergeFields.alpha_1, 'TEST-DISPATCH-001'));
+  all.slice(5, 10).forEach((b) => assert.equal(b.mergeFields.alpha_1, 'TEST-DISPATCH-001'));
   // the last four send mergeFields as a list of { fieldKey, value | fieldValue }
-  const listed = all.slice(26);
+  const listed = all.slice(10);
   assert.deepEqual(listed.map((b) => Object.keys(b.mergeFields[0])), [['fieldKey', 'value'], ['fieldKey', 'value'], ['fieldKey', 'fieldValue'], ['fieldKey', 'fieldValue']]);
   assert.deepEqual(listed[0].mergeFields.find((e) => e.fieldKey === 'alpha_3'), { fieldKey: 'alpha_3', value: 'Honda' });
   assert.equal(listed[0].mergeFields.length, 9);
@@ -1446,13 +1430,13 @@ test('recipient matrix: stops at the first HTTP 200/201 and logs the winning pay
     if (url === USERS_URL) return { code: 200, body: JSON.stringify(USERS) };
     if (url === GROUPS_URL) return { code: 200, body: '[]' };
     const b = JSON.parse(options.payload);
-    return b.recipients && typeof b.recipients[0] === 'number' ? { code: 201, body: '{"dispatchId":"T-99"}' } : NO_RECIPIENT;
+    return b.recipients && b.dispatchName ? { code: 201, body: '{"dispatchId":"T-99"}' } : NO_RECIPIENT;
   };
   env.ctx.testFastFieldDispatch();
-  assert.equal(bodies(env).length, 11, 'it stopped at recipients: [user id]');
+  assert.equal(bodies(env).length, 8, 'it stopped at recipients + dispatchName');
   const log = logText(env);
-  assert.match(log, /ACCEPTED with recipients: \[user id\] \(task T-99 created/);
-  assert.match(log, /Winning payload schema: \{"formId":98765,"name":"Tow - 2022 Honda Civic - TEST-DISPATCH-001","mergeFields":"<mergeFields>","recipients":\[5002\]\}/);
+  assert.match(log, /ACCEPTED with recipients: \[\{userId\}\] \+ dispatchName \(task T-99 created/);
+  assert.match(log, /Winning payload schema: \{"formId":98765,"name":"Tow - 2022 Honda Civic - TEST-DISPATCH-001","mergeFields":"<mergeFields>","dispatchName":"Tow - 2022 Honda Civic - TEST-DISPATCH-001","recipients":\[\{"userId":5002\}\]\}/);
   assert.match(log, /not one dispatches send yet/);
 });
 
@@ -1463,10 +1447,11 @@ test('recipient matrix: the winning schema never shows the email', () => {
     if (url === FORMS_URL) return { code: 200, body: JSON.stringify(FORMS) };
     if (url === USERS_URL) return { code: 200, body: JSON.stringify(USERS) };
     if (url === GROUPS_URL) return { code: 200, body: '[]' };
-    return JSON.parse(options.payload).assignedTo ? { code: 200, body: '{"id":"T-7"}' } : NO_RECIPIENT;
+    const b = JSON.parse(options.payload);
+    return b.recipients && b.recipients[0].email && !b.dispatchName && !Array.isArray(b.mergeFields) ? { code: 200, body: '{"id":"T-7"}' } : NO_RECIPIENT;
   };
   env.ctx.testFastFieldDispatch();
-  assert.match(logText(env), /Winning payload schema: \{"formId":98765,"name":"Tow - 2022 Honda Civic - TEST-DISPATCH-001","mergeFields":"<mergeFields>","assignedTo":"<email>"\}/);
+  assert.match(logText(env), /Winning payload schema: \{"formId":98765,"name":"Tow - 2022 Honda Civic - TEST-DISPATCH-001","mergeFields":"<mergeFields>","recipients":\[\{"email":"<email>"\}\]\}/);
 });
 
 test('step 3: the usergroups are listed with the session headers, and a failure does not stop the test', () => {
@@ -1504,14 +1489,14 @@ test('recipient matrix: a 500 is not an acceptance, the next shapes are still tr
     if (url === USERS_URL) return { code: 200, body: JSON.stringify(USERS) };
     if (url === GROUPS_URL) return { code: 200, body: '[]' };
     const b = JSON.parse(options.payload);
-    if (b.recipients && typeof b.recipients[0] === 'number') return { code: 500, body: '{"message":"Error creating dispatch","Code":500}' };
-    if (b.recipients && b.recipients[0] && b.recipients[0].id === 5002 && b.recipients[0].isAnonymousDispatch === false) return { code: 201, body: '{"dispatchId":"T-5"}' };
+    if (b.title) return { code: 201, body: '{"dispatchId":"T-5"}' };
+    if (b.recipients) return { code: 500, body: '{"message":"Error creating dispatch","Code":500}' };
     return NO_RECIPIENT;
   };
   env.ctx.testFastFieldDispatch();
   assert.match(logText(env), /HTTP 500 is a server error, not an acceptance; continuing/);
-  assert.match(logText(env), /ACCEPTED with recipients: \[\{id, isAnonymousDispatch:false\}\]/);
-  assert.match(logText(env), /Winning payload schema: .*"recipients":\[\{"id":5002,"isAnonymousDispatch":false\}\]/);
+  assert.match(logText(env), /ACCEPTED with recipients: \[\{userId\}\] \+ title/);
+  assert.match(logText(env), /Winning payload schema: .*"title":.*"recipients":\[\{"userId":5002\}\]/);
 });
 
 test('recipient matrix: a 429 is waited out and retried, never taken for an acceptance', () => {
@@ -1530,7 +1515,7 @@ test('recipient matrix: a 429 is waited out and retried, never taken for an acce
   assert.deepEqual([...env.sleeps], [36000, 36000]);
   assert.ok(!/ACCEPTED|different answer/.test(logText(env)));
   assert.match(logText(env), /rate limited \(HTTP 429\); waiting 36 s/);
-  assert.equal(dispatches(env).length, 32, '30 shapes, plus the 2 repeated');
+  assert.equal(dispatches(env).length, 16, '14 shapes, plus the 2 repeated');
 
   const stuck = configure(makeContext());
   stuck.fetcher.respond = (url) => (url === FORMS_URL ? { code: 200, body: JSON.stringify(FORMS) }
