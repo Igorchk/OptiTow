@@ -53,15 +53,16 @@ function appPayload(overrides = {}) {
   }, overrides);
 }
 
-/** Every request after sign-in carries the gateway key and the session token, and no Bearer or password. */
+/** Every request after sign-in carries the gateway key (both names) and the session token, and no Bearer or password. */
 function assertSessionHeaders(call, { sub = SUB, token = TOKEN } = {}) {
   const h = call.options.headers;
-  assert.equal(h['Ocp-Apim-Subscription-Key'], sub, 'the gateway gets the subscription key');
+  assert.equal(h['Ocp-Apim-Subscription-Key'], sub, 'the gateway gets the subscription key (Azure name)');
+  assert.equal(h['FastField-API-Key'], sub, 'and under FastField\'s own name');
   assert.equal(h['X-Gatekeeper-SessionToken'], token, 'FastField gets the session token');
   assert.equal(h['Content-Type'], 'application/json');
   assert.equal(h.Accept, 'application/json');
   assert.equal(h.Authorization, undefined, 'no Basic or Bearer header outside sign-in');
-  assert.equal(Object.keys(h).length, 4);
+  assert.equal(Object.keys(h).length, 5);
 }
 
 const hook = (body, query = {}) => ({ token: API_SECRET, ...body, ...query });
@@ -350,6 +351,7 @@ test('session: a cold start signs in with Basic auth plus the subscription key, 
   assert.equal(options.method, 'post');
   assert.equal(options.headers.Authorization, basic(USER, PASSWORD), 'base64(email:password), UTF-8');
   assert.equal(options.headers['Ocp-Apim-Subscription-Key'], SUB);
+  assert.equal(options.headers['FastField-API-Key'], SUB);
   assert.equal(options.headers['Content-Type'], 'application/json');
   assert.equal(options.headers.Accept, 'application/json');
   assert.equal(options.headers['X-Gatekeeper-SessionToken'], undefined, 'no session yet');
@@ -440,14 +442,15 @@ test('session: a failed sign-in logs the status and reply, returns null, and cac
   assert.ok(down.logs.error.some((e) => e.includes('DNS error')));
 });
 
-test('sign-in request: carries exactly Authorization, Ocp-Apim-Subscription-Key, Content-Type and Accept', () => {
+test('sign-in request: carries exactly Authorization, FastField-API-Key, Ocp-Apim-Subscription-Key, Content-Type and Accept', () => {
   const env = configure(makeContext());
   env.ctx.getFastFieldSessionToken_();
   const { url, options } = signIns(env)[0];
   assert.equal(url, AUTH_URL, 'no key in the URL');
-  assert.deepEqual(Object.keys(options.headers).sort(), ['Accept', 'Authorization', 'Content-Type', 'Ocp-Apim-Subscription-Key']);
+  assert.deepEqual(Object.keys(options.headers).sort(), ['Accept', 'Authorization', 'Content-Type', 'FastField-API-Key', 'Ocp-Apim-Subscription-Key']);
   assert.equal(options.headers['Ocp-Apim-Subscription-Key'], SUB, 'present and equal to the subscription key');
-  assert.notEqual(options.headers['Ocp-Apim-Subscription-Key'], '');
+  assert.equal(options.headers['FastField-API-Key'], SUB, 'present and equal to the subscription key');
+  assert.notEqual(options.headers['FastField-API-Key'], '');
   assert.equal(options.headers.Authorization, basic(USER, PASSWORD));
   assert.equal(options.payload, undefined);
   assert.equal(options.contentType, undefined, 'the header carries it; no duplicate option');
@@ -469,7 +472,10 @@ test('sign-in request: every FastField request after it carries the same subscri
   fastFieldServer(env);
   env.ctx.testFastFieldDispatch();
   assert.equal(env.fetchCalls.length, 3);
-  env.fetchCalls.forEach((c) => assert.equal(c.options.headers['Ocp-Apim-Subscription-Key'], SUB, c.url));
+  env.fetchCalls.forEach((c) => {
+    assert.equal(c.options.headers['Ocp-Apim-Subscription-Key'], SUB, c.url);
+    assert.equal(c.options.headers['FastField-API-Key'], SUB, c.url);
+  });
   assert.equal(env.fetchCalls[0].options.headers['X-Gatekeeper-SessionToken'], undefined, 'sign-in has no session yet');
   assert.equal(env.fetchCalls[1].options.headers['X-Gatekeeper-SessionToken'], TOKEN);
   assert.equal(env.fetchCalls[2].options.headers['X-Gatekeeper-SessionToken'], TOKEN);
@@ -540,12 +546,14 @@ test('session: the retry happens only once, and not when signing in again yields
 test('session: headers carry the session token only when there is one', () => {
   const env = makeContext();
   assert.deepEqual(JSON.parse(JSON.stringify(env.ctx.getFastFieldHeaders_('SUBKEY', 'SESSION'))), {
+    'FastField-API-Key': 'SUBKEY',
     'Ocp-Apim-Subscription-Key': 'SUBKEY',
     'X-Gatekeeper-SessionToken': 'SESSION',
     'Content-Type': 'application/json',
     Accept: 'application/json',
   });
   assert.deepEqual(JSON.parse(JSON.stringify(env.ctx.getFastFieldHeaders_('SUBKEY', ''))), {
+    'FastField-API-Key': 'SUBKEY',
     'Ocp-Apim-Subscription-Key': 'SUBKEY',
     'Content-Type': 'application/json',
     Accept: 'application/json',
@@ -678,16 +686,17 @@ test('testFastFieldDispatch: a "missing subscription key" at sign-in lists the h
   assert.equal(env.ctx.testFastFieldDispatch(), null);
   assert.equal(signIns(env).length, 4, 'the real sign-in, then three probes');
   assert.ok(env.fetchCalls.every((c) => c.url.startsWith(AUTH_URL)), 'nothing else is tried');
-  const [, headerOnly, queryOnly, both] = signIns(env);
-  assert.equal(headerOnly.options.headers['Ocp-Apim-Subscription-Key'], SUB);
-  assert.equal(headerOnly.url, AUTH_URL);
+  const [, ffOnly, ocpOnly, queryOnly] = signIns(env);
+  assert.equal(ffOnly.options.headers['FastField-API-Key'], SUB);
+  assert.equal(ffOnly.options.headers['Ocp-Apim-Subscription-Key'], undefined);
+  assert.equal(ocpOnly.options.headers['Ocp-Apim-Subscription-Key'], SUB);
+  assert.equal(ocpOnly.options.headers['FastField-API-Key'], undefined);
   assert.equal(queryOnly.url, AUTH_URL + '?subscription-key=' + SUB);
   assert.equal(queryOnly.options.headers['Ocp-Apim-Subscription-Key'], undefined);
-  assert.equal(both.url, AUTH_URL + '?subscription-key=' + SUB);
-  assert.equal(both.options.headers['Ocp-Apim-Subscription-Key'], SUB);
+  assert.equal(queryOnly.options.headers['FastField-API-Key'], undefined);
   const log = logText(env);
-  assert.match(log, /NO subscription key on the sign-in request[\s\S]*Authorization, Ocp-Apim-Subscription-Key \(32 characters\), Content-Type, Accept/);
-  assert.match(log, /Ocp-Apim-Subscription-Key header \(headers sent: Authorization, Ocp-Apim-Subscription-Key, Accept\): HTTP 401/);
+  assert.match(log, /NO subscription key on the sign-in request[\s\S]*Authorization, FastField-API-Key and Ocp-Apim-Subscription-Key \(each 32 characters\), Content-Type, Accept/);
+  assert.match(log, /FastField-API-Key header only \(headers sent: Authorization, FastField-API-Key, Accept\): HTTP 401/);
   assert.match(log, /Every placement was refused/);
   noSecrets(env);
 });

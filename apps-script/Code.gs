@@ -1072,11 +1072,14 @@ function fastFieldConfig_() {
 }
 
 /**
- * Headers for every FastField call after signing in: the gateway's subscription key, and the login
- * session token (omitted when there is none, as for the sign-in itself).
+ * Headers for every FastField call after signing in: the gateway's subscription key under both names
+ * FastField's gateway reads (its own FastField-API-Key and Azure's standard Ocp-Apim-Subscription-Key;
+ * with only the standard one the gateway answers "missing subscription key"), and the login session
+ * token (omitted when there is none, as for the sign-in itself).
  */
 function getFastFieldHeaders_(subscriptionKey, sessionToken) {
   const headers = {
+    'FastField-API-Key': subscriptionKey,
     'Ocp-Apim-Subscription-Key': subscriptionKey,
     'Content-Type': 'application/json',
     'Accept': 'application/json',
@@ -1124,12 +1127,13 @@ function getFastFieldSessionToken_() {
   // Spelled out here rather than built by a helper, so what goes on the wire is plain to read.
   const headers = {
     'Authorization': 'Basic ' + credentials,
+    'FastField-API-Key': subscriptionKey,
     'Ocp-Apim-Subscription-Key': subscriptionKey,
     'Content-Type': 'application/json',
     'Accept': 'application/json',
   };
-  if (!headers['Ocp-Apim-Subscription-Key']) {
-    console.warn('FastField sign-in: the Ocp-Apim-Subscription-Key header would be empty; not sending.');
+  if (!headers['FastField-API-Key'] || !headers['Ocp-Apim-Subscription-Key']) {
+    console.warn('FastField sign-in: the subscription key headers would be empty; not sending.');
     return null;
   }
   try {
@@ -1370,9 +1374,9 @@ function probeFastFieldSignIn_(subscriptionKey, user, password) {
   const url = CONFIG.FASTFIELD_AUTH_URL;
   const withQuery = url + (url.indexOf('?') === -1 ? '?' : '&') + 'subscription-key=' + encodeURIComponent(subscriptionKey);
   const attempts = [
-    { label: 'Ocp-Apim-Subscription-Key header', url: url, headers: { 'Authorization': basicAuth, 'Ocp-Apim-Subscription-Key': subscriptionKey, 'Accept': 'application/json' } },
-    { label: '?subscription-key= query parameter', url: withQuery, headers: { 'Authorization': basicAuth, 'Accept': 'application/json' } },
-    { label: 'header and query parameter together', url: withQuery, headers: { 'Authorization': basicAuth, 'Ocp-Apim-Subscription-Key': subscriptionKey, 'Accept': 'application/json' } },
+    { label: 'FastField-API-Key header only', url: url, headers: { 'Authorization': basicAuth, 'FastField-API-Key': subscriptionKey, 'Accept': 'application/json' } },
+    { label: 'Ocp-Apim-Subscription-Key header only', url: url, headers: { 'Authorization': basicAuth, 'Ocp-Apim-Subscription-Key': subscriptionKey, 'Accept': 'application/json' } },
+    { label: '?subscription-key= query parameter only', url: withQuery, headers: { 'Authorization': basicAuth, 'Accept': 'application/json' } },
   ];
   Logger.log('The gateway says the sign-in has NO subscription key. Sending it a few ways to see which one it reads:');
   let accepted = null;
@@ -1442,7 +1446,7 @@ function testFastFieldDispatch() {
       Logger.log('Reply: ' + describeFastFieldError_({ parsed: (function () { try { return JSON.parse(failure.text); } catch (_) { return null; } })(), text: failure.text }));
       if (failure.code === 401 && /missing subscription key/i.test(failure.text)) {
         Logger.log('The gateway reports NO subscription key on the sign-in request. The request was sent with these header names: ' +
-          'Authorization, Ocp-Apim-Subscription-Key (' + config.FASTFIELD_SUBSCRIPTION_KEY.length + ' characters), Content-Type, Accept.');
+          'Authorization, FastField-API-Key and Ocp-Apim-Subscription-Key (each ' + config.FASTFIELD_SUBSCRIPTION_KEY.length + ' characters), Content-Type, Accept.');
         probeFastFieldSignIn_(config.FASTFIELD_SUBSCRIPTION_KEY, config.FASTFIELD_USER_ID, config.FASTFIELD_PASSWORD);
       } else if (failure.code === 401 && /subscription key/i.test(failure.text)) {
         Logger.log('Azure API Management (the gateway) rejected the SUBSCRIPTION KEY. Check FASTFIELD_SUBSCRIPTION_KEY.');
