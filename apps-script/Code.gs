@@ -13,7 +13,8 @@
  *                          page (customer's phone)       the landing page) is public but only
  *                                                        accepted for a token the app registered
  *
- * `doGet` answers a health check, or, with `?loc=<token>`, serves the customer's landing page.
+ * `doGet` answers a health check, or, with `?loc=<token>`, serves the customer's landing page, or, with
+ * `?action=test_fastfield&token=<API_SECRET>`, runs the FastField diagnostic and returns its report.
  *
  * Apps Script cannot read request headers or set HTTP status codes, so auth is a
  * pre-shared token in the payload/query and every response is HTTP 200 with a JSON
@@ -31,6 +32,9 @@
  *                     Receipt_PDF_URL (written by the return webhook when the form is completed)
  */
 
+// FastField's v3 API root; the FastField addresses in CONFIG are built from it.
+const FASTFIELD_API_BASE = 'https://api.fastfieldforms.com/services/v3';
+
 const CONFIG = Object.freeze({
   CALL_LOG_SHEET: 'Call Log',
   REFERENCE_SHEET: 'Reference Data',
@@ -47,8 +51,17 @@ const CONFIG = Object.freeze({
   ROW_GROWTH: 500,
   // How long a customer's shared location stays readable (and how long a link stays valid).
   LOCATION_TTL_SECONDS: 15 * 60,
-  // The one place the FastField dispatch address lives, in case the account uses another API version.
-  FASTFIELD_DISPATCH_URL: 'https://api.fastfieldforms.com/services/v1/dispatches',
+  // FastField's v3 API: the one place these addresses live. The dispatch route is the singular
+  // /dispatch (confirmed: FastField's own server answers it).
+  FASTFIELD_DISPATCH_URL: FASTFIELD_API_BASE + '/dispatch',
+  FASTFIELD_FORMS_URL: FASTFIELD_API_BASE + '/forms',
+  FASTFIELD_AUTH_URL: FASTFIELD_API_BASE + '/authenticate',
+  FASTFIELD_USERS_URL: FASTFIELD_API_BASE + '/users',
+  FASTFIELD_USERGROUPS_URL: FASTFIELD_API_BASE + '/usergroups',
+  // The login session token is cached for at most this long (the longest CacheService allows), and
+  // for less if FastField says it expires sooner.
+  FASTFIELD_SESSION_TTL_SECONDS: 21600,
+  FASTFIELD_SESSION_CACHE_KEY: 'fastfield_session_token',
   FASTFIELD_LOCK_WAIT_MS: 30000,
   // Phase 3 of a dispatch only stamps one cell, so it waits briefly.
   FASTFIELD_STAMP_LOCK_WAIT_MS: 5000,
@@ -196,6 +209,7 @@ function doPost(e) {
 function doGet(e) {
   const params = (e && e.parameter) || {};
   if (params.loc !== undefined) return locationPage_(String(params.loc));
+  if (params.action === 'test_fastfield') return fastFieldTestRoute_(params);
   return json_({ ok: true, service: 'optitow-middleware' });
 }
 
@@ -412,11 +426,26 @@ function parseRequest_(e) {
   };
 }
 
+/**
+ * A Script Property cleaned of what a paste leaves behind: surrounding whitespace, newlines and tabs,
+ * and surrounding quote characters. '' when it is unset or blank. Used for every secret and id the
+ * script reads, so an invisible stray character cannot make a correct value fail.
+ */
+function sanitizeProperty_(value) {
+  let s = String(value === undefined || value === null ? '' : value).trim();
+  while (/^["']|["']$/.test(s)) s = s.replace(/^["']+|["']+$/g, '').trim();
+  return s;
+}
+
+function getScriptProperty_(name) {
+  return sanitizeProperty_(PropertiesService.getScriptProperties().getProperty(name));
+}
+
 function authorize_(source, token) {
   // The website token ships in public page code, so it gets its own secret that can
   // only create website leads — never the API_SECRET used by the app, CallRail and AI.
   const propName = source === 'website' ? 'WEBSITE_SECRET' : 'API_SECRET';
-  const expected = PropertiesService.getScriptProperties().getProperty(propName);
+  const expected = getScriptProperty_(propName);
   if (!expected) {
     throw new ApiError('SERVER_MISCONFIGURED', propName + ' is not set in Script Properties.');
   }
@@ -966,7 +995,9 @@ function applyAiResult_(body) {
 //      ?source=fastfield&token=<API_SECRET>; the report's PDF link is saved to Receipt_PDF_URL.
 // ---------------------------------------------------------------------------
 
-const FASTFIELD_REQUIRED = Object.freeze(['FASTFIELD_API_KEY', 'FASTFIELD_FORM_ID', 'FASTFIELD_USER_ID']);
+// Needed for any dispatch. Signing in also needs FASTFIELD_PASSWORD (or a FASTFIELD_SESSION_TOKEN_OVERRIDE
+// for a test). FASTFIELD_USER_ID is both the login email and the user the task is assigned to.
+const FASTFIELD_REQUIRED = Object.freeze(['FASTFIELD_SUBSCRIPTION_KEY', 'FASTFIELD_FORM_ID', 'FASTFIELD_USER_ID']);
 
 /**
  * Marks a call's dispatch as in flight (called with the sheet lock held). A second request for the
@@ -1024,21 +1055,297 @@ function callDataFromRecord_(rec) {
   return out;
 }
 
-/** The three FastField settings, or null (with a warning) when any is missing or blank. */
+/**
+ * The FastField settings, or null (with a warning) when one is missing or blank. Signing in needs
+ * the password, unless a manual session token override stands in for it.
+ */
 function fastFieldConfig_() {
-  const props = PropertiesService.getScriptProperties();
   const config = {};
   const missing = [];
   FASTFIELD_REQUIRED.forEach(function (name) {
-    const value = String(props.getProperty(name) || '').trim();
+    const value = getScriptProperty_(name);
     if (value) config[name] = value;
     else missing.push(name);
   });
+  config.FASTFIELD_PASSWORD = getScriptProperty_('FASTFIELD_PASSWORD');
+  config.FASTFIELD_SESSION_TOKEN_OVERRIDE = getScriptProperty_('FASTFIELD_SESSION_TOKEN_OVERRIDE');
+  // Optional: who a task is assigned to, if FastField wants something other than the login email.
+  config.FASTFIELD_RECIPIENT_ID = getScriptProperty_('FASTFIELD_RECIPIENT_ID');
+  config.FASTFIELD_RECIPIENT_FIELD = getScriptProperty_('FASTFIELD_RECIPIENT_FIELD');
+  if (!config.FASTFIELD_PASSWORD && !config.FASTFIELD_SESSION_TOKEN_OVERRIDE) {
+    missing.push('FASTFIELD_PASSWORD');
+  }
   if (missing.length) {
     console.warn('FastField dispatch skipped: ' + missing.join(', ') + ' not set in Script Properties.');
     return null;
   }
   return config;
+}
+
+/**
+ * Headers for every FastField call after signing in: the gateway's subscription key under both names
+ * FastField's gateway reads (its own FastField-API-Key and Azure's standard Ocp-Apim-Subscription-Key;
+ * with only the standard one the gateway answers "missing subscription key"), and the login session
+ * token (omitted when there is none, as for the sign-in itself).
+ */
+function getFastFieldHeaders_(subscriptionKey, sessionToken) {
+  const headers = {
+    'FastField-API-Key': subscriptionKey,
+    'Ocp-Apim-Subscription-Key': subscriptionKey,
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+  };
+  if (sessionToken) headers['X-Gatekeeper-SessionToken'] = sessionToken;
+  return headers;
+}
+
+// Where the last getFastFieldSessionToken_ got its token ('cache', 'override' or 'authenticated') and,
+// if it failed, what FastField said: for testFastFieldDispatch to report.
+let fastFieldSession_ = { source: '', failure: null, expires: '' };
+
+/**
+ * The FastField session token, from the cache, a manual override, or a fresh sign-in
+ * (POST /authenticate with the account's email and password as Basic auth, plus the subscription
+ * key). A new token is cached for up to 6 hours, or until shortly before FastField says it expires.
+ * Returns null, after logging why, if there is none; callers then skip FastField.
+ */
+function getFastFieldSessionToken_() {
+  fastFieldSession_ = { source: '', failure: null, expires: '' };
+  const cache = CacheService.getScriptCache();
+  const cached = cache.get(CONFIG.FASTFIELD_SESSION_CACHE_KEY);
+  if (cached) {
+    fastFieldSession_.source = 'cache';
+    return cached;
+  }
+  const override = getScriptProperty_('FASTFIELD_SESSION_TOKEN_OVERRIDE');
+  if (override) {
+    fastFieldSession_.source = 'override';
+    return override;
+  }
+
+  const subscriptionKey = getScriptProperty_('FASTFIELD_SUBSCRIPTION_KEY');
+  const user = getScriptProperty_('FASTFIELD_USER_ID');
+  const password = getScriptProperty_('FASTFIELD_PASSWORD');
+  if (!subscriptionKey || !user || !password) {
+    const missing = [['FASTFIELD_SUBSCRIPTION_KEY', subscriptionKey], ['FASTFIELD_USER_ID', user], ['FASTFIELD_PASSWORD', password]]
+      .filter(function (pair) { return !pair[1]; }).map(function (pair) { return pair[0]; });
+    console.warn('FastField sign-in skipped: ' + missing.join(', ') + ' not set in Script Properties.');
+    fastFieldSession_.failure = { code: 0, text: '', error: 'missing ' + missing.join(', ') };
+    return null;
+  }
+
+  const credentials = Utilities.base64Encode(user + ':' + password);
+  // Spelled out here rather than built by a helper, so what goes on the wire is plain to read.
+  const headers = {
+    'Authorization': 'Basic ' + credentials,
+    'FastField-API-Key': subscriptionKey,
+    'Ocp-Apim-Subscription-Key': subscriptionKey,
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+  };
+  if (!headers['FastField-API-Key'] || !headers['Ocp-Apim-Subscription-Key']) {
+    console.warn('FastField sign-in: the subscription key headers would be empty; not sending.');
+    return null;
+  }
+  try {
+    // No payload, so no separate contentType option (the header above already says it).
+    const response = UrlFetchApp.fetch(CONFIG.FASTFIELD_AUTH_URL, {
+      method: 'post',
+      headers: headers,
+      muteHttpExceptions: true,
+    });
+    const code = response.getResponseCode();
+    const text = String(response.getContentText());
+    traceFastField_('POST', CONFIG.FASTFIELD_AUTH_URL, code, typeof response.getAllHeaders === 'function' ? response.getAllHeaders() : {}, text);
+    let parsed = null;
+    try { parsed = JSON.parse(text); } catch (_) { parsed = null; }
+    const data = parsed && typeof parsed === 'object' ? (parsed.sessionToken ? parsed : (parsed.data || {})) : {};
+    const token = code === 200 && data.sessionToken ? String(data.sessionToken).trim() : '';
+    if (!token) {
+      console.error('FastField sign-in failed: HTTP ' + code + ' ' + text.slice(0, 500));
+      fastFieldSession_.failure = { code: code, text: text, error: '' };
+      return null;
+    }
+    let ttl = CONFIG.FASTFIELD_SESSION_TTL_SECONDS;
+    const expires = data.sessionExpiration ? new Date(data.sessionExpiration) : null;
+    if (expires && !isNaN(expires.getTime())) {
+      // Stop using it a minute before FastField would refuse it.
+      ttl = Math.max(60, Math.min(ttl, Math.floor((expires.getTime() - Date.now()) / 1000) - 60));
+      fastFieldSession_.expires = String(data.sessionExpiration);
+    }
+    cache.put(CONFIG.FASTFIELD_SESSION_CACHE_KEY, token, ttl);
+    fastFieldSession_.source = 'authenticated';
+    return token;
+  } catch (err) {
+    const message = redactSecrets_(String(err && err.message ? err.message : err), [subscriptionKey, password, credentials]);
+    console.error('FastField sign-in error: ' + message);
+    fastFieldSession_.failure = { code: 0, text: '', error: message };
+    return null;
+  }
+}
+
+/** `text` with each secret (4+ characters) replaced, for messages an exception may have put a URL or header in. */
+function redactSecrets_(text, secrets) {
+  let out = String(text);
+  secrets.forEach(function (secret) {
+    const value = String(secret === undefined || secret === null ? '' : secret);
+    if (value.length >= 4) out = out.split(value).join('***');
+  });
+  return out;
+}
+
+function clearFastFieldSessionToken_() {
+  CacheService.getScriptCache().remove(CONFIG.FASTFIELD_SESSION_CACHE_KEY);
+}
+
+// How a recipient may be named in a dispatch body.
+const FASTFIELD_RECIPIENT_FIELDS = Object.freeze(['users', 'userIds', 'userEmail', 'recipients']);
+
+/** Who a dispatch goes to: { field, value }, from the optional RECIPIENT properties, else the login email. */
+function fastFieldRecipient_(config) {
+  const field = FASTFIELD_RECIPIENT_FIELDS.indexOf(config.FASTFIELD_RECIPIENT_FIELD) !== -1
+    ? config.FASTFIELD_RECIPIENT_FIELD : 'recipients';
+  return { field: field, value: config.FASTFIELD_RECIPIENT_ID || config.FASTFIELD_USER_ID };
+}
+
+/** The task's title, which FastField requires ("Cannot insert NULL into column Name" without it). */
+function fastFieldDispatchName_(callData) {
+  const car = [callData.vehicle_year, callData.vehicle_make, callData.vehicle_model]
+    .filter(function (v) { return v !== undefined && v !== null && String(v).trim() !== ''; }).join(' ');
+  return ['Tow', car, callData.call_id].filter(Boolean).join(' - ');
+}
+
+/** The merge fields that pre-fill the job, by FastField field key. */
+function fastFieldMergeFields_(callData) {
+  const notes = callData.notes_comments === undefined || callData.notes_comments === null
+    ? '' : String(callData.notes_comments).trim();
+  const quote = callData.quoted_price ? 'Quoted: $' + callData.quoted_price : '';
+  const text = function (v) { return v === undefined || v === null ? '' : v; };
+  return {
+    alpha_1: callData.call_id,
+    multiline_1: [notes, quote].filter(Boolean).join(' | '),
+    formattedinput_1: text(callData.customer_phone),
+    numeric_1: Number(callData.vehicle_year) || null,
+    alpha_3: text(callData.vehicle_make),
+    alpha_4: text(callData.vehicle_model),
+    alpha_9: text(callData.pickup_address),
+    alpha_13: text(callData.dropoff_address),
+    listpicker_2: text(callData.service_requested),
+  };
+}
+
+/** `mergeFields` as FastField's dispatch wants it: a list of { fieldKey, value }. */
+function fastFieldMergeFieldList_(fields) {
+  return Object.keys(fields).map(function (key) { return { fieldKey: key, value: fields[key] }; });
+}
+
+/**
+ * The dispatch body, in the shape FastField accepted (HTTP 201, confirmed live): the form, a task
+ * name, who it goes to (`recipient`: { field, value }) and the merge fields as a { fieldKey, value }
+ * list. By default the recipient is `recipients: [{ userId }]` (a numeric FASTFIELD_RECIPIENT_ID) or
+ * `[{ email }]`; the older `users`, `userIds` and `userEmail` fields are still selectable.
+ */
+function buildFastFieldPayload_(callData, formId, recipient) {
+  const payload = {
+    formId: formId,
+    name: fastFieldDispatchName_(callData),
+    mergeFields: fastFieldMergeFieldList_(fastFieldMergeFields_(callData)),
+  };
+  if (recipient.field === 'recipients') {
+    payload.recipients = [/^\d+$/.test(String(recipient.value)) ? { userId: Number(recipient.value) } : { email: recipient.value }];
+  } else {
+    // `users` and `userIds` take a list; `userEmail` a single address.
+    payload[recipient.field] = recipient.field === 'userEmail' ? recipient.value : [recipient.value];
+  }
+  return payload;
+}
+
+// While the diagnostic runs over HTTP (?action=test_fastfield), every FastField request and every
+// diagnostic line is also collected here so it can be returned as one JSON report. null otherwise.
+let fastFieldTrace_ = null;
+const FASTFIELD_TRACE_BODY_LIMIT = 3000;
+
+/** A diagnostic line: to the Apps Script log, and into the HTTP report when one is being built. */
+function diag_(message) {
+  Logger.log(message);
+  if (fastFieldTrace_) fastFieldTrace_.log.push(String(message));
+}
+
+/** A session token shown as its first and last 4 characters only. */
+function maskToken_(value) {
+  const t = String(value);
+  return t.length >= 16 ? t.slice(0, 4) + '...' + t.slice(-4) : '***';
+}
+
+/** Records one FastField request for the report: no query string, cookies and tokens hidden. */
+function traceFastField_(method, url, code, headers, text) {
+  if (!fastFieldTrace_) return;
+  let body;
+  try { body = JSON.parse(text); } catch (_) { body = String(text).slice(0, 2000); }
+  if (body && typeof body === 'object') {
+    body = JSON.parse(JSON.stringify(body));
+    if (body.sessionToken) body.sessionToken = maskToken_(body.sessionToken);
+    if (body.data && typeof body.data === 'object' && body.data.sessionToken) body.data.sessionToken = maskToken_(body.data.sessionToken);
+  }
+  // A dispatch answer can carry the whole form; keep the report small enough to be returned.
+  const size = JSON.stringify(body === undefined ? null : body).length;
+  const entry = { method: method, url: String(url).split('?')[0], status: code, responseHeaders: redactHeaders_(headers), body: body };
+  if (size > FASTFIELD_TRACE_BODY_LIMIT) {
+    entry.body = JSON.stringify(body).slice(0, FASTFIELD_TRACE_BODY_LIMIT) + '...';
+    entry.bodyChars = size;
+  }
+  fastFieldTrace_.requests.push(entry);
+}
+
+/** Response headers with the ones that carry cookies, tokens or keys hidden, for logs and reports. */
+function redactHeaders_(headers) {
+  const shown = {};
+  Object.keys(headers || {}).forEach(function (name) {
+    shown[name] = /cookie|authorization|token|key/i.test(name) ? '[hidden]' : headers[name];
+  });
+  return shown;
+}
+
+/**
+ * GET ?action=test_fastfield&token=<API_SECRET>[&step=3 | &from=N&count=M]: runs testFastFieldDispatch and returns everything it
+ * did as JSON: the lines it logged, and each FastField request's status, response headers and parsed
+ * body. No secret appears in it (keys and the password are never logged; session tokens and cookies
+ * are masked). It sends a real TEST task to FastField when the chain gets that far.
+ */
+function fastFieldTestRoute_(params) {
+  const expected = getScriptProperty_('API_SECRET');
+  const token = String(params.token === undefined || params.token === null ? '' : params.token);
+  if (!expected || !token || !safeEqual_(token, expected)) {
+    return json_({ ok: false, code: 'UNAUTHORIZED', error: 'UNAUTHORIZED' });
+  }
+  fastFieldTrace_ = { requests: [], log: [] };
+  let result = null;
+  let error = '';
+  try {
+    const whole = function (v) { return /^\d+$/.test(String(v)) ? Number(v) : undefined; };
+    const options = {};
+    if (whole(params.step) === 3) options.stopAfterStep = 3;
+    if (whole(params.from) !== undefined) {
+      options.matrixFrom = whole(params.from);
+      options.matrixCount = whole(params.count) || 4;
+    }
+    result = testFastFieldDispatch(options);
+  } catch (err) {
+    error = redactSecrets_(String(err && err.message ? err.message : err),
+      [getScriptProperty_('FASTFIELD_SUBSCRIPTION_KEY'), getScriptProperty_('FASTFIELD_PASSWORD'), expected]);
+    console.error('test_fastfield failed: ' + error);
+  }
+  const trace = fastFieldTrace_;
+  fastFieldTrace_ = null;
+  const dispatched = trace.requests.some(function (r) {
+    return r.method === 'POST' && r.url === CONFIG.FASTFIELD_DISPATCH_URL && (r.status === 200 || r.status === 201);
+  });
+  let shown = result;
+  const resultText = JSON.stringify(result === undefined ? null : result);
+  if (resultText.length > FASTFIELD_TRACE_BODY_LIMIT) shown = resultText.slice(0, FASTFIELD_TRACE_BODY_LIMIT) + '...';
+  const report = { ok: !error, action: 'test_fastfield', dispatched: dispatched, result: shown, requests: trace.requests, log: trace.log };
+  if (error) report.error = error;
+  return json_(report);
 }
 
 /**
@@ -1057,43 +1364,46 @@ function sendFastFieldDispatch_(callData) {
     return null;
   }
 
-  const notes = callData.notes_comments === undefined || callData.notes_comments === null
-    ? '' : String(callData.notes_comments).trim();
-  const quote = callData.quoted_price ? 'Quoted: $' + callData.quoted_price : '';
-  const text = function (v) { return v === undefined || v === null ? '' : v; };
-  const payload = {
-    formId: formId,
-    assignedUserId: config.FASTFIELD_USER_ID,
-    fields: {
-      alpha_1: callData.call_id,
-      multiline_1: [notes, quote].filter(Boolean).join(' | '),
-      formattedinput_1: text(callData.customer_phone),
-      numeric_1: Number(callData.vehicle_year) || null,
-      alpha_3: text(callData.vehicle_make),
-      alpha_4: text(callData.vehicle_model),
-      alpha_9: text(callData.pickup_address),
-      alpha_13: text(callData.dropoff_address),
-      listpicker_2: text(callData.service_requested),
-    },
-  };
+  const payload = buildFastFieldPayload_(callData, formId, fastFieldRecipient_(config));
 
+  const token = getFastFieldSessionToken_();
+  if (!token) {
+    console.warn('FastField dispatch skipped: no session token (sign-in failed or not configured).');
+    return null;
+  }
+  let result = postFastFieldDispatch_(config.FASTFIELD_SUBSCRIPTION_KEY, token, payload);
+  if (result.code === 401 && !result.error) {
+    // The session may have been invalidated before its expiry: sign in again and retry once.
+    clearFastFieldSessionToken_();
+    const fresh = getFastFieldSessionToken_();
+    if (fresh && fresh !== token) {
+      result = postFastFieldDispatch_(config.FASTFIELD_SUBSCRIPTION_KEY, fresh, payload);
+      result.retried = true;
+    }
+  }
+  return result;
+}
+
+/** One POST of a dispatch (to `url`, by default the dispatch address): { code, headers, text, parsed, id, error }. */
+function postFastFieldDispatch_(subscriptionKey, sessionToken, payload, url) {
   const result = { code: 0, headers: {}, text: '', parsed: null, id: '', error: '' };
   try {
-    const response = UrlFetchApp.fetch(CONFIG.FASTFIELD_DISPATCH_URL, {
+    const response = UrlFetchApp.fetch(url || CONFIG.FASTFIELD_DISPATCH_URL, {
       method: 'post',
       contentType: 'application/json',
-      headers: { Authorization: 'Bearer ' + config.FASTFIELD_API_KEY },
+      headers: getFastFieldHeaders_(subscriptionKey, sessionToken),
       payload: JSON.stringify(payload),
       muteHttpExceptions: true,
     });
     result.code = response.getResponseCode();
     result.text = String(response.getContentText());
     if (typeof response.getAllHeaders === 'function') result.headers = response.getAllHeaders();
+    traceFastField_('POST', url || CONFIG.FASTFIELD_DISPATCH_URL, result.code, result.headers, result.text);
     try { result.parsed = JSON.parse(result.text); } catch (_) { result.parsed = null; }
-    const found = result.parsed && (result.parsed.dispatchId || result.parsed.taskId);
+    const found = result.parsed && (result.parsed.objectId || result.parsed.dispatchId || result.parsed.taskId || result.parsed.id);
     if (found) result.id = String(found);
   } catch (err) {
-    result.error = String(err && err.message ? err.message : err);
+    result.error = redactSecrets_(String(err && err.message ? err.message : err), [subscriptionKey, sessionToken]);
   }
   return result;
 }
@@ -1104,7 +1414,15 @@ function sendFastFieldDispatch_(callData) {
  * either way, so nothing here throws.
  */
 function dispatchToFastField_(callData) {
-  const result = sendFastFieldDispatch_(callData);
+  let result;
+  try {
+    result = sendFastFieldDispatch_(callData);
+  } catch (err) {
+    // Guard: whatever goes wrong here must never stop the call from being saved.
+    console.error('FastField dispatch crashed: ' + redactSecrets_(String(err && err.message ? err.message : err),
+      [getScriptProperty_('FASTFIELD_SUBSCRIPTION_KEY'), getScriptProperty_('FASTFIELD_PASSWORD')]));
+    return null;
+  }
   if (!result) return null;
   if (result.error) {
     console.error('FastField dispatch error: ' + result.error);
@@ -1115,20 +1433,245 @@ function dispatchToFastField_(callData) {
     return null;
   }
   if (!result.id) {
-    console.error('FastField dispatch answered HTTP ' + result.code + ' without a dispatchId or taskId: ' + result.text.slice(0, 500));
+    console.error('FastField dispatch answered HTTP ' + result.code + ' without an objectId, dispatchId, taskId or id: ' + result.text.slice(0, 500));
     return null;
   }
   return result.id;
 }
 
+/** A GET to FastField: { code, headers, text, parsed, error }. `headers` are the request headers. */
+function fastFieldGet_(url, headers) {
+  const result = { code: 0, headers: {}, text: '', parsed: null, error: '' };
+  try {
+    const response = UrlFetchApp.fetch(url, {
+      method: 'get',
+      headers: headers,
+      muteHttpExceptions: true,
+    });
+    result.code = response.getResponseCode();
+    result.text = String(response.getContentText());
+    if (typeof response.getAllHeaders === 'function') result.headers = response.getAllHeaders();
+    traceFastField_('GET', url, result.code, result.headers, result.text);
+    try { result.parsed = JSON.parse(result.text); } catch (_) { result.parsed = null; }
+  } catch (err) {
+    result.error = redactSecrets_(String(err && err.message ? err.message : err),
+      Object.keys(headers || {}).map(function (name) { return headers[name]; }));
+  }
+  return result;
+}
+
+/** The forms in a /forms reply, whether it is a bare array or wrapped in forms / data / items / results. */
+function fastFieldFormList_(parsed) {
+  if (Array.isArray(parsed)) return parsed;
+  if (!parsed || typeof parsed !== 'object') return null;
+  const keys = ['forms', 'data', 'items', 'results'];
+  for (let i = 0; i < keys.length; i++) {
+    if (Array.isArray(parsed[keys[i]])) return parsed[keys[i]];
+  }
+  return null;
+}
+
+function fastFieldFormId_(form) {
+  const id = form && (form.id !== undefined ? form.id : (form.formId !== undefined ? form.formId : form.form_id));
+  return id === undefined || id === null ? '' : String(id);
+}
+
+function fastFieldFormName_(form) {
+  return String((form && (form.name || form.formName || form.title)) || '(no name)');
+}
+
+/** FastField's own explanation of a rejected request, from message / error / errors in the reply. */
+function describeFastFieldError_(result) {
+  const parsed = result.parsed;
+  const parts = [];
+  if (parsed && typeof parsed === 'object') {
+    ['message', 'error', 'errors', 'detail', 'title'].forEach(function (key) {
+      const v = parsed[key];
+      if (v === undefined || v === null || v === '') return;
+      parts.push(key + ': ' + (typeof v === 'string' ? v : JSON.stringify(v)));
+    });
+  }
+  return parts.length ? parts.join(' | ') : result.text.slice(0, 1000);
+}
+
 /**
- * Manual diagnostic: run it from the Apps Script editor to check the FastField credentials and the
- * dispatch address with the live Script Properties. It sends a clearly marked TEST task and logs the
- * HTTP status, the response headers and the parsed reply. It does not touch the Call Log. The task
- * is real, though: it appears on the driver's FastField list, so delete it there afterwards.
+ * What a key looks like, without revealing it: its length, a masked form, whether it is 32-character
+ * hex, and anything a paste may have added (surrounding whitespace or quotes, whitespace inside).
+ * `raw` is the property as stored, `key` the cleaned value that is actually sent.
  */
-function testFastFieldDispatch() {
-  const callData = {
+function describeKey_(raw, key) {
+  const stored = String(raw === undefined || raw === null ? '' : raw);
+  let format = 'other';
+  if (/^[0-9a-f]{32}$/i.test(key)) format = '32-character hexadecimal';
+  else if (/^[0-9a-f]+$/i.test(key)) format = 'hexadecimal, ' + key.length + ' characters';
+  else if (/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(key)) format = 'JWT-like (three dot-separated parts)';
+  else if (/^[A-Za-z0-9]+$/.test(key)) format = 'alphanumeric';
+  return {
+    length: key.length,
+    // A short key would be mostly on show, so those are not masked this way.
+    masked: key.length >= 16 ? key.slice(0, 4) + '...' + key.slice(-4) : '(too short to show safely)',
+    isHex32: /^[0-9a-f]{32}$/i.test(key),
+    format: format,
+    hadSurroundingWhitespace: stored !== stored.trim(),
+    hadSurroundingQuotes: /^\s*["']|["']\s*$/.test(stored),
+    hasInternalWhitespace: /\s/.test(key),
+  };
+}
+
+/**
+ * After a sign-in the gateway says has no subscription key: sends the same sign-in a few ways and
+ * logs what the gateway answers to each, so the placement it actually reads is known. The header
+ * NAMES that were sent are listed, never the values.
+ */
+function probeFastFieldSignIn_(subscriptionKey, user, password) {
+  const basicAuth = 'Basic ' + Utilities.base64Encode(user + ':' + password);
+  const url = CONFIG.FASTFIELD_AUTH_URL;
+  const withQuery = url + (url.indexOf('?') === -1 ? '?' : '&') + 'subscription-key=' + encodeURIComponent(subscriptionKey);
+  const attempts = [
+    { label: 'FastField-API-Key header only', url: url, headers: { 'Authorization': basicAuth, 'FastField-API-Key': subscriptionKey, 'Accept': 'application/json' } },
+    { label: 'Ocp-Apim-Subscription-Key header only', url: url, headers: { 'Authorization': basicAuth, 'Ocp-Apim-Subscription-Key': subscriptionKey, 'Accept': 'application/json' } },
+    { label: '?subscription-key= query parameter only', url: withQuery, headers: { 'Authorization': basicAuth, 'Accept': 'application/json' } },
+  ];
+  diag_('The gateway says the sign-in has NO subscription key. Sending it a few ways to see which one it reads:');
+  let accepted = null;
+  attempts.forEach(function (attempt) {
+    try {
+      const response = UrlFetchApp.fetch(attempt.url, { method: 'post', headers: attempt.headers, muteHttpExceptions: true });
+      const code = response.getResponseCode();
+      const text = String(response.getContentText());
+      let parsed = null;
+      try { parsed = JSON.parse(text); } catch (_) { parsed = null; }
+      const ok = code === 200 && parsed && (parsed.sessionToken || (parsed.data && parsed.data.sessionToken));
+      diag_('  ' + attempt.label + ' (headers sent: ' + Object.keys(attempt.headers).join(', ') + '): HTTP ' + code +
+        (ok ? ' (accepted: a session was issued)' : ' - ' + redactSecrets_(describeFastFieldError_({ parsed: parsed, text: text }), [subscriptionKey, password])));
+      if (ok && !accepted) accepted = attempt.label;
+    } catch (err) {
+      diag_('  ' + attempt.label + ': request failed (' + redactSecrets_(String(err && err.message ? err.message : err), [subscriptionKey, password]) + ')');
+    }
+  });
+  if (accepted) diag_('The gateway accepts the subscription key via: ' + accepted + '. Tell me which.');
+  else diag_('Every placement was refused. If any answer still says "missing", the sign-in endpoint reads the key from a name this script does not use; compare with the header or query name shown for the authenticate operation in the FastField developer portal.');
+}
+
+/** Logs a credential's summary without revealing it. `masked` shows only its ends. */
+function logSecretSummary_(label, raw, value, note) {
+  if (!value) {
+    diag_(label + ': MISSING' + (note ? ' (' + note + ')' : ''));
+    return;
+  }
+  const info = describeKey_(raw, value);
+  diag_(label + ': present, ' + info.length + ' characters, masked ' + info.masked + ', 32-character hex: ' + info.isHex32);
+  if (info.hadSurroundingWhitespace || info.hadSurroundingQuotes) diag_('  Stray whitespace or quotes were removed before use.');
+  if (info.hasInternalWhitespace) diag_('  Warning: whitespace INSIDE the value (not removed): probably pasted with a line break.');
+}
+
+/**
+ * Manual diagnostic: run it from the Apps Script editor to check the whole FastField chain with the
+ * live Script Properties, in three steps.
+ *   1. Sign in: get a session token (cached, override, or a fresh POST /authenticate) and show a
+ *      masked summary of it.
+ *   2. Forms: GET the forms list with the session headers and look for FASTFIELD_FORM_ID.
+ *   3. Recipient: GET the account's users, list them (id, email, role, groups) and find
+ *      FASTFIELD_USER_ID among them.
+ *   4. Dispatch: send one clearly marked TEST task and log the status, headers and reply (with
+ *      FastField's own message for a 400 or 422). If FastField says the recipient was not found, the
+ *      user id and other ways of naming the recipient are tried.
+ * It never touches the Call Log. The task is real, though: it appears on the driver's FastField
+ * list, so delete it there afterwards. Returns the parsed dispatch reply, or null if it stopped.
+ */
+function testFastFieldDispatch(options) {
+  options = options || {};
+  const config = fastFieldConfig_();
+  if (!config) {
+    diag_('Nothing was sent. FASTFIELD_SUBSCRIPTION_KEY, FASTFIELD_FORM_ID, FASTFIELD_USER_ID and FASTFIELD_PASSWORD (or FASTFIELD_SESSION_TOKEN_OVERRIDE) must be set in Script Properties.');
+    return null;
+  }
+  const props = PropertiesService.getScriptProperties();
+  logSecretSummary_('FASTFIELD_SUBSCRIPTION_KEY (Azure gateway key)', props.getProperty('FASTFIELD_SUBSCRIPTION_KEY'), config.FASTFIELD_SUBSCRIPTION_KEY);
+  if (!/^[0-9a-f]{32}$/i.test(config.FASTFIELD_SUBSCRIPTION_KEY)) diag_('  Note: an Azure subscription key is normally 32 hexadecimal characters.');
+  diag_('FASTFIELD_USER_ID (login email and assigned user): ' + config.FASTFIELD_USER_ID);
+  diag_('FASTFIELD_PASSWORD: ' + (config.FASTFIELD_PASSWORD ? 'present (' + config.FASTFIELD_PASSWORD.length + ' characters)' : 'MISSING') +
+    (config.FASTFIELD_SESSION_TOKEN_OVERRIDE ? '; FASTFIELD_SESSION_TOKEN_OVERRIDE is set and will be used instead of signing in' : ''));
+
+  diag_('Step 1 of 4: signing in to FastField (POST ' + CONFIG.FASTFIELD_AUTH_URL + ')');
+  const token = getFastFieldSessionToken_();
+  if (!token) {
+    const failure = fastFieldSession_.failure || { code: 0, text: '', error: '' };
+    if (failure.error) {
+      diag_('Sign-in failed before FastField answered: ' + failure.error);
+    } else {
+      diag_('Sign-in failed: HTTP ' + failure.code);
+      diag_('Reply: ' + describeFastFieldError_({ parsed: (function () { try { return JSON.parse(failure.text); } catch (_) { return null; } })(), text: failure.text }));
+      if (failure.code === 401 && /missing subscription key/i.test(failure.text)) {
+        diag_('The gateway reports NO subscription key on the sign-in request. The request was sent with these header names: ' +
+          'Authorization, FastField-API-Key and Ocp-Apim-Subscription-Key (each ' + config.FASTFIELD_SUBSCRIPTION_KEY.length + ' characters), Content-Type, Accept.');
+        probeFastFieldSignIn_(config.FASTFIELD_SUBSCRIPTION_KEY, config.FASTFIELD_USER_ID, config.FASTFIELD_PASSWORD);
+      } else if (failure.code === 401 && /subscription key/i.test(failure.text)) {
+        diag_('Azure API Management (the gateway) rejected the SUBSCRIPTION KEY. Check FASTFIELD_SUBSCRIPTION_KEY.');
+      } else if (failure.code === 401 || failure.code === 403) {
+        diag_('The gateway let the subscription key through, but FastField rejected the LOGIN. Check FASTFIELD_USER_ID (the account email) and FASTFIELD_PASSWORD.');
+      } else if (failure.code === 404) {
+        diag_('Not found: check CONFIG.FASTFIELD_AUTH_URL.');
+      }
+    }
+    diag_('Stopped: fix sign-in before anything else is tried.');
+    return null;
+  }
+  const how = { cache: 'a cached session', override: 'FASTFIELD_SESSION_TOKEN_OVERRIDE', authenticated: 'a new sign-in' }[fastFieldSession_.source] || 'unknown';
+  logSecretSummary_('Session token (from ' + how + ')', token, token);
+  if (fastFieldSession_.expires) diag_('  Session expires: ' + fastFieldSession_.expires);
+
+  diag_('Step 2 of 4: forms check (GET ' + CONFIG.FASTFIELD_FORMS_URL + ')');
+  const forms = fastFieldGet_(CONFIG.FASTFIELD_FORMS_URL, getFastFieldHeaders_(config.FASTFIELD_SUBSCRIPTION_KEY, token));
+  if (forms.error) {
+    diag_('Request failed before FastField answered: ' + forms.error);
+    return null;
+  }
+  diag_('HTTP status: ' + forms.code);
+  if (forms.code !== 200) {
+    diag_('Reply: ' + describeFastFieldError_(forms));
+    if (forms.code === 401) {
+      diag_(/subscription key/i.test(forms.text)
+        ? 'The gateway rejected the subscription key. Check FASTFIELD_SUBSCRIPTION_KEY.'
+        : 'FastField rejected the session token (expired or invalid). Run again to sign in afresh' +
+          (fastFieldSession_.source === 'override' ? ', and replace FASTFIELD_SESSION_TOKEN_OVERRIDE.' : '.'));
+      if (fastFieldSession_.source !== 'override') clearFastFieldSessionToken_();
+    } else if (forms.code === 404) {
+      diag_('Not found: check CONFIG.FASTFIELD_FORMS_URL.');
+    }
+    diag_('Stopped: fix the forms check before a task is sent.');
+    return null;
+  }
+  const list = fastFieldFormList_(forms.parsed);
+  if (!list) {
+    diag_('The forms reply was not a list I recognize, so the form id could not be checked. Reply: ' + forms.text.slice(0, 500));
+    diag_('Continuing without verifying the form.');
+  } else {
+    const wanted = String(config.FASTFIELD_FORM_ID);
+    const match = list.filter(function (f) { return fastFieldFormId_(f) === wanted; })[0];
+    if (match) {
+      diag_('Gateway cleared & forms verified: ' + list.map(fastFieldFormName_).join(', '));
+      diag_('Form verified: ' + fastFieldFormName_(match));
+    } else {
+      diag_('FASTFIELD_FORM_ID "' + wanted + '" is not among the ' + list.length + ' form(s) this account can see. Available forms:');
+      list.forEach(function (f) { diag_('  ' + fastFieldFormId_(f) + '  ' + fastFieldFormName_(f)); });
+      diag_('Stopped: correct FASTFIELD_FORM_ID in Script Properties (or the login belongs to a different account).');
+      return null;
+    }
+  }
+
+  diag_('Step 3 of 4: finding the recipient (GET ' + CONFIG.FASTFIELD_USERS_URL + ')');
+  const found = discoverFastFieldUser_(config, token);
+  const groups = fastFieldGet_(CONFIG.FASTFIELD_USERGROUPS_URL, getFastFieldHeaders_(config.FASTFIELD_SUBSCRIPTION_KEY, token));
+  diag_('User groups (GET ' + CONFIG.FASTFIELD_USERGROUPS_URL + '): ' + (groups.error ? 'request failed (' + groups.error + ')' : 'HTTP ' + groups.code + ' ' + groups.text.slice(0, 500)));
+
+  if (options.stopAfterStep === 3) {
+    diag_('Stopped after step 3 as requested.');
+    return null;
+  }
+
+  diag_('Step 4 of 4: sending a TEST task (it will show up on the driver\'s list; delete it afterwards).');
+  const testCall = {
     call_id: 'TEST-DISPATCH-001',
     outcome: OUTCOME_WON,
     customer_phone: '916-555-0100',
@@ -1141,32 +1684,231 @@ function testFastFieldDispatch() {
     quoted_price: 150,
     notes_comments: 'TEST DISPATCH, safe to delete',
   };
-  Logger.log('Sending a TEST task to FastField (it will show up on the driver\'s list; delete it afterwards).');
-  const result = sendFastFieldDispatch_(callData);
+  if (options.matrixFrom !== undefined) {
+    diag_('Skipping the first send; trying recipient shapes ' + options.matrixFrom + ' to ' + (options.matrixFrom + options.matrixCount - 1) + ' only.');
+    return tryFastFieldRecipientFormats_(config, token, testCall, found, options.matrixFrom, options.matrixCount);
+  }
+  const result = sendFastFieldDispatch_(testCall);
   if (!result) {
-    Logger.log('Nothing was sent. Check the log above: FASTFIELD_API_KEY, FASTFIELD_FORM_ID and FASTFIELD_USER_ID must all be set in Script Properties.');
+    diag_('Nothing was sent (see above).');
     return null;
   }
   if (result.error) {
-    Logger.log('Request failed before FastField answered: ' + result.error);
+    diag_('Request failed before FastField answered: ' + result.error);
     return null;
   }
-  Logger.log('HTTP status: ' + result.code);
-  Logger.log('Response headers: ' + JSON.stringify(result.headers));
-  if (result.parsed) Logger.log('Parsed response: ' + JSON.stringify(result.parsed));
-  else Logger.log('Response body (not JSON): ' + result.text.slice(0, 1000));
+  if (result.retried) diag_('The first attempt got HTTP 401, so a fresh session was started and the dispatch retried once.');
+  diag_('HTTP status: ' + result.code);
+  diag_('Response headers: ' + JSON.stringify(redactHeaders_(result.headers)));
+  if (result.parsed) diag_('Parsed response: ' + JSON.stringify(result.parsed).slice(0, 2000));
+  else diag_('Response body (not JSON): ' + result.text.slice(0, 1000));
   if (result.code === 200 || result.code === 201) {
-    Logger.log(result.id
+    diag_(result.id
       ? 'OK. FastField created task ' + result.id + '.'
-      : 'FastField answered OK but the reply has no dispatchId or taskId; check the reply above.');
+      : 'FastField answered OK but the reply has no dispatchId, taskId or id; check the reply above.');
+  } else if (result.code === 400 || result.code === 422) {
+    diag_('FastField rejected the request as invalid. Its message: ' + describeFastFieldError_(result));
   } else if (result.code === 401 || result.code === 403) {
-    Logger.log('Rejected: the API key was not accepted. Check FASTFIELD_API_KEY.');
+    diag_('Rejected: the session or subscription key was not accepted for dispatching.');
+  } else if (isRecipientNotFound_(result)) {
+    diag_('FastField\'s own server answered (the route is right) but there is no such recipient: "' + describeFastFieldError_(result) + '".');
+    tryFastFieldRecipientFormats_(config, getFastFieldSessionToken_(), testCall, found);
   } else if (result.code === 404) {
-    Logger.log('Not found: check the dispatch address (CONFIG.FASTFIELD_DISPATCH_URL) and FASTFIELD_FORM_ID.');
+    diag_('Not found. If the reply is {"statusCode":404,"message":"Resource not found"} the Azure gateway has no such route (check CONFIG.FASTFIELD_DISPATCH_URL); anything else came from FastField\'s own server. Reply: ' + describeFastFieldError_(result));
   } else {
-    Logger.log('Rejected: see the reply above for FastField\'s reason.');
+    diag_('Rejected: see the reply above for FastField\'s reason.');
   }
   return result.parsed;
+}
+
+// ---- user discovery for testFastFieldDispatch ----
+
+function fastFieldFirst_(obj, keys) {
+  for (let i = 0; i < keys.length; i++) {
+    const v = obj && obj[keys[i]];
+    if (v !== undefined && v !== null && v !== '') return v;
+  }
+  return '';
+}
+
+/** A readable form of one field that may be a string, a list or a list of objects. */
+function fastFieldNames_(value) {
+  if (value === undefined || value === null || value === '') return '';
+  if (Array.isArray(value)) {
+    return value.map(function (v) { return typeof v === 'object' && v ? String(fastFieldFirst_(v, ['name', 'groupName', 'title', 'id'])) : String(v); }).join('; ');
+  }
+  if (typeof value === 'object') return String(fastFieldFirst_(value, ['name', 'groupName', 'title', 'id']));
+  return String(value);
+}
+
+function fastFieldUserId_(user) {
+  const id = fastFieldFirst_(user, ['id', 'userId', 'UserId', 'userID', 'uid', 'guid']);
+  return id === '' ? '' : String(id);
+}
+
+function fastFieldUserEmail_(user) {
+  return String(fastFieldFirst_(user, ['email', 'emailAddress', 'EmailAddress', 'userName', 'username', 'login'])).trim();
+}
+
+function fastFieldUserList_(parsed) {
+  if (Array.isArray(parsed)) return parsed;
+  if (!parsed || typeof parsed !== 'object') return null;
+  const keys = ['users', 'data', 'items', 'results'];
+  for (let i = 0; i < keys.length; i++) {
+    if (Array.isArray(parsed[keys[i]])) return parsed[keys[i]];
+  }
+  return null;
+}
+
+/** FastField's own application answered "no such recipient" (not the gateway's route-not-found). */
+function isRecipientNotFound_(result) {
+  return result.code === 404 && /Recipient User or User Group not found/i.test(result.text);
+}
+
+/**
+ * Lists the account's users (GET /users) and finds the one matching `login`. Returns
+ * { users, match, id } (id is the match's user id or ''), or null if the list could not be read.
+ * Never fatal: a failure is logged and the dispatch test goes on.
+ */
+function discoverFastFieldUser_(config, sessionToken) {
+  const response = fastFieldGet_(CONFIG.FASTFIELD_USERS_URL, getFastFieldHeaders_(config.FASTFIELD_SUBSCRIPTION_KEY, sessionToken));
+  if (response.error) {
+    diag_('Users request failed before FastField answered: ' + response.error);
+    return null;
+  }
+  diag_('HTTP status: ' + response.code);
+  if (response.code !== 200) {
+    diag_('Could not list users (continuing). Reply: ' + response.text.slice(0, 500));
+    return null;
+  }
+  const users = fastFieldUserList_(response.parsed);
+  if (!users) {
+    diag_('The users reply was not a list I recognize. Reply: ' + response.text.slice(0, 500));
+    return null;
+  }
+  diag_('Users this account can see (' + users.length + '):');
+  users.slice(0, 50).forEach(function (u) {
+    diag_('  id: ' + (fastFieldUserId_(u) || '(none)') + ' | email: ' + (fastFieldUserEmail_(u) || '(none)') +
+      ' | role: ' + (fastFieldNames_(fastFieldFirst_(u, ['role', 'roles', 'userRole', 'roleName'])) || '(none)') +
+      ' | groups: ' + (fastFieldNames_(fastFieldFirst_(u, ['groups', 'userGroups', 'groupNames', 'group'])) || '(none)'));
+  });
+  if (users.length > 50) diag_('  ... and ' + (users.length - 50) + ' more.');
+  const wanted = config.FASTFIELD_USER_ID.toLowerCase();
+  const match = users.filter(function (u) { return fastFieldUserEmail_(u).toLowerCase() === wanted; })[0];
+  if (!match) {
+    diag_('No user has the email FASTFIELD_USER_ID (' + config.FASTFIELD_USER_ID + '). A task can only go to a user or group that exists in this account.');
+    return { users: users, match: null, id: '' };
+  }
+  const id = fastFieldUserId_(match);
+  diag_('Found ' + config.FASTFIELD_USER_ID + ' as user id ' + (id || '(the user has no id field; see the list above)') + '.');
+  return { users: users, match: match, id: id };
+}
+
+/**
+ * When the first dispatch got FastField's "Recipient User or User Group not found", sends the same
+ * task naming the recipient other ways (the user's id in `users`, in `userIds`, and the email in
+ * `userEmail`), logging each exact status and reply, and stops at the first that FastField does not
+ * answer with that same error. Whatever it accepts creates a real test task.
+ */
+function tryFastFieldRecipientFormats_(config, sessionToken, testCall, found, from, count) {
+  const formId = Number(config.FASTFIELD_FORM_ID);
+  const first = fastFieldRecipient_(config);
+  const email = config.FASTFIELD_USER_ID;
+  const fields = fastFieldMergeFields_(testCall);
+  const userId = found && found.id ? (isFinite(Number(found.id)) ? Number(found.id) : found.id) : null;
+  const candidates = [];
+  // A candidate: a label (the email shown as <email>), the whole body, and, for the three shapes the
+  // code can send, the recipient settings that would select it.
+  const add = function (label, payload, recipient) { candidates.push({ label: label, payload: payload, recipient: recipient }); };
+  const name = buildFastFieldPayload_(testCall, formId, first).name;
+  const base = function (extra) {
+    const body = { formId: formId, name: name, mergeFields: fields };
+    Object.keys(extra).forEach(function (k) { body[k] = extra[k]; });
+    return body;
+  };
+  if (userId !== null) {
+    add('users: [user id ' + found.id + ']', buildFastFieldPayload_(testCall, formId, { field: 'users', value: found.id }), { field: 'users', value: found.id });
+    add('userIds: [user id ' + found.id + ']', buildFastFieldPayload_(testCall, formId, { field: 'userIds', value: found.id }), { field: 'userIds', value: found.id });
+  }
+  add('userEmail: <email>', buildFastFieldPayload_(testCall, formId, { field: 'userEmail', value: email }), { field: 'userEmail', value: email });
+  add('userIds: [<email>]', buildFastFieldPayload_(testCall, formId, { field: 'userIds', value: email }), { field: 'userIds', value: email });
+  // Tried live and answered "recipient not found" or a server error about the entry's type, so no
+  // longer sent: users as objects, assignedUserId / assignedUsers / assignedTo, bare ids in `recipients`,
+  // recipients: [{id}], and a PascalCase body (HTTP 400 "missing formId").
+  // FastField read recipients: [{userId}] and [{email}] (past "recipient not found") and then asked for
+  // a name, so these send one, under the keys it might use.
+  if (userId !== null) add('recipients: [{userId}] + name', base({ recipients: [{ userId: userId }] }), { field: 'recipients', value: found.id });
+  add('recipients: [{email}] + name', base({ recipients: [{ email: email }] }), { field: 'recipients', value: email });
+  if (userId !== null) {
+    add('recipients: [{userId}] + dispatchName', base({ dispatchName: name, recipients: [{ userId: userId }] }));
+    add('recipients: [{userId}] + title', base({ title: name, recipients: [{ userId: userId }] }));
+    add('recipients: [{userId}] + Name', base({ Name: name, recipients: [{ userId: userId }] }));
+  }
+  // The server then failed reading mergeFields as an object ("JProperty does not contain fieldKey"),
+  // so these send it as a list of { fieldKey, <valueKey> } entries.
+  const listed = function (valueKey) {
+    return Object.keys(fields).map(function (k) { const e = { fieldKey: k }; e[valueKey] = fields[k]; return e; });
+  };
+  ['value', 'fieldValue'].forEach(function (valueKey) {
+    if (userId !== null) add('recipients: [{userId}] + mergeFields list {fieldKey, ' + valueKey + '}', { formId: formId, name: name, mergeFields: listed(valueKey), recipients: [{ userId: userId }] });
+    add('recipients: [{email}] + mergeFields list {fieldKey, ' + valueKey + '}', { formId: formId, name: name, mergeFields: listed(valueKey), recipients: [{ email: email }] });
+  });
+  let closest = null;
+  const seen = {};
+  seen[first.field + ': ' + (first.field === 'userEmail' ? '<email>' : '[' + (first.value === email ? '<email>' : 'user id ' + first.value) + ']')] = true;
+  diag_('FastField did not find the recipient. Trying ' + candidates.length + ' other ways to name them (stops at the first that is not "recipient not found"):');
+  for (let i = 0; i < candidates.length; i++) {
+    const c = candidates[i];
+    if (seen[c.label]) continue;
+    seen[c.label] = true;
+    if (from !== undefined && (i < from || i >= from + count)) continue;
+    let attempt = postFastFieldDispatch_(config.FASTFIELD_SUBSCRIPTION_KEY, sessionToken, c.payload, undefined);
+    // The gateway limits requests per minute: wait out a 429 and send the same shape again.
+    for (let wait = 0; attempt.code === 429 && wait < 3; wait++) {
+      const asked = /(\d+)\s*second/i.exec(attempt.text);
+      const seconds = Math.min(Math.max(asked ? Number(asked[1]) + 1 : 15, 5), 60);
+      diag_('  ' + c.label + ': rate limited (HTTP 429); waiting ' + seconds + ' s and trying the same shape again.');
+      Utilities.sleep(seconds * 1000);
+      attempt = postFastFieldDispatch_(config.FASTFIELD_SUBSCRIPTION_KEY, sessionToken, c.payload, undefined);
+    }
+    if (attempt.code === 429) {
+      diag_('Stopped: still rate limited by FastField. Run the diagnostic again in a minute.');
+      return null;
+    }
+    if (attempt.error) {
+      diag_('  ' + c.label + ': request failed (' + attempt.error + ')');
+      continue;
+    }
+    diag_('  ' + c.label + ': HTTP ' + attempt.code + ' ' + attempt.text.slice(0, 1000));
+    if (isRecipientNotFound_(attempt)) continue;
+    const shape = JSON.stringify(c.payload, function (k, v) { return k === 'mergeFields' || k === 'MergeFields' ? '<mergeFields>' : (v === email ? '<email>' : v); });
+    const ok = attempt.code === 200 || attempt.code === 201;
+    if (attempt.code >= 500) {
+      diag_('  (HTTP ' + attempt.code + ' is a server error, not an acceptance; continuing.) Shape: ' + shape);
+      closest = { label: c.label, payload: c.payload, status: attempt.code };
+      continue;
+    }
+    if (ok) {
+      diag_('ACCEPTED with ' + c.label + (attempt.id ? ' (task ' + attempt.id + ' created; delete it from the driver\'s list)' : '') + '.');
+    } else {
+      diag_('FastField gave a different answer this time (not "recipient not found"), so it accepted ' + c.label + ' as a recipient and rejected something else. Its message: ' + describeFastFieldError_(attempt));
+    }
+    diag_('Winning payload schema: ' + shape);
+    if (c.recipient) {
+      const settings = [];
+      if (c.recipient.value !== email) settings.push('FASTFIELD_RECIPIENT_ID = ' + c.recipient.value);
+      if (c.recipient.field !== 'users') settings.push('FASTFIELD_RECIPIENT_FIELD = ' + c.recipient.field);
+      diag_(settings.length
+        ? (ok ? 'To use it for real dispatches, set in Script Properties: ' : 'Likely recipient settings: ') + settings.join(' and ') + '.'
+        : 'This is already how dispatches name the recipient.');
+    } else {
+      diag_('This shape is not one dispatches send yet: buildFastFieldPayload_ must be changed to produce it.');
+    }
+    return { label: c.label, payload: c.payload, status: attempt.code };
+  }
+  diag_('No way of naming the recipient was accepted. Check the user list above: the recipient must be a user (or user group) in this FastField account.' +
+    (closest ? ' The closest was ' + closest.label + ' (HTTP ' + closest.status + ').' : ''));
+  return null;
 }
 
 function firstString_(values) {
@@ -1499,7 +2241,7 @@ function setup() {
   ['API_SECRET', 'WEBSITE_SECRET'].forEach(function (name) {
     console.log(name + (props.getProperty(name) ? ' is set.' : ' is NOT set — add it under Project Settings > Script Properties.'));
   });
-  FASTFIELD_REQUIRED.forEach(function (name) {
+  FASTFIELD_REQUIRED.concat(['FASTFIELD_PASSWORD']).forEach(function (name) {
     console.log(name + (props.getProperty(name) ? ' is set.' : ' is not set (optional): won calls will not be dispatched to FastField.'));
   });
 }
