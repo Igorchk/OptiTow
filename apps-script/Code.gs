@@ -1121,12 +1121,21 @@ function getFastFieldSessionToken_() {
   }
 
   const credentials = Utilities.base64Encode(user + ':' + password);
-  const headers = getFastFieldHeaders_(subscriptionKey, '');
-  headers.Authorization = 'Basic ' + credentials;
+  // Spelled out here rather than built by a helper, so what goes on the wire is plain to read.
+  const headers = {
+    'Authorization': 'Basic ' + credentials,
+    'Ocp-Apim-Subscription-Key': subscriptionKey,
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+  };
+  if (!headers['Ocp-Apim-Subscription-Key']) {
+    console.warn('FastField sign-in: the Ocp-Apim-Subscription-Key header would be empty; not sending.');
+    return null;
+  }
   try {
+    // No payload, so no separate contentType option (the header above already says it).
     const response = UrlFetchApp.fetch(CONFIG.FASTFIELD_AUTH_URL, {
       method: 'post',
-      contentType: 'application/json',
       headers: headers,
       muteHttpExceptions: true,
     });
@@ -1152,10 +1161,21 @@ function getFastFieldSessionToken_() {
     fastFieldSession_.source = 'authenticated';
     return token;
   } catch (err) {
-    console.error('FastField sign-in error: ' + err);
-    fastFieldSession_.failure = { code: 0, text: '', error: String(err && err.message ? err.message : err) };
+    const message = redactSecrets_(String(err && err.message ? err.message : err), [subscriptionKey, password, credentials]);
+    console.error('FastField sign-in error: ' + message);
+    fastFieldSession_.failure = { code: 0, text: '', error: message };
     return null;
   }
+}
+
+/** `text` with each secret (4+ characters) replaced, for messages an exception may have put a URL or header in. */
+function redactSecrets_(text, secrets) {
+  let out = String(text);
+  secrets.forEach(function (secret) {
+    const value = String(secret === undefined || secret === null ? '' : secret);
+    if (value.length >= 4) out = out.split(value).join('***');
+  });
+  return out;
 }
 
 function clearFastFieldSessionToken_() {
@@ -1235,7 +1255,7 @@ function postFastFieldDispatch_(subscriptionKey, sessionToken, payload) {
     const found = result.parsed && (result.parsed.dispatchId || result.parsed.taskId || result.parsed.id);
     if (found) result.id = String(found);
   } catch (err) {
-    result.error = String(err && err.message ? err.message : err);
+    result.error = redactSecrets_(String(err && err.message ? err.message : err), [subscriptionKey, sessionToken]);
   }
   return result;
 }
@@ -1340,6 +1360,41 @@ function describeKey_(raw, key) {
   };
 }
 
+/**
+ * After a sign-in the gateway says has no subscription key: sends the same sign-in a few ways and
+ * logs what the gateway answers to each, so the placement it actually reads is known. The header
+ * NAMES that were sent are listed, never the values.
+ */
+function probeFastFieldSignIn_(subscriptionKey, user, password) {
+  const basicAuth = 'Basic ' + Utilities.base64Encode(user + ':' + password);
+  const url = CONFIG.FASTFIELD_AUTH_URL;
+  const withQuery = url + (url.indexOf('?') === -1 ? '?' : '&') + 'subscription-key=' + encodeURIComponent(subscriptionKey);
+  const attempts = [
+    { label: 'Ocp-Apim-Subscription-Key header', url: url, headers: { 'Authorization': basicAuth, 'Ocp-Apim-Subscription-Key': subscriptionKey, 'Accept': 'application/json' } },
+    { label: '?subscription-key= query parameter', url: withQuery, headers: { 'Authorization': basicAuth, 'Accept': 'application/json' } },
+    { label: 'header and query parameter together', url: withQuery, headers: { 'Authorization': basicAuth, 'Ocp-Apim-Subscription-Key': subscriptionKey, 'Accept': 'application/json' } },
+  ];
+  Logger.log('The gateway says the sign-in has NO subscription key. Sending it a few ways to see which one it reads:');
+  let accepted = null;
+  attempts.forEach(function (attempt) {
+    try {
+      const response = UrlFetchApp.fetch(attempt.url, { method: 'post', headers: attempt.headers, muteHttpExceptions: true });
+      const code = response.getResponseCode();
+      const text = String(response.getContentText());
+      let parsed = null;
+      try { parsed = JSON.parse(text); } catch (_) { parsed = null; }
+      const ok = code === 200 && parsed && (parsed.sessionToken || (parsed.data && parsed.data.sessionToken));
+      Logger.log('  ' + attempt.label + ' (headers sent: ' + Object.keys(attempt.headers).join(', ') + '): HTTP ' + code +
+        (ok ? ' (accepted: a session was issued)' : ' - ' + redactSecrets_(describeFastFieldError_({ parsed: parsed, text: text }), [subscriptionKey, password])));
+      if (ok && !accepted) accepted = attempt.label;
+    } catch (err) {
+      Logger.log('  ' + attempt.label + ': request failed (' + redactSecrets_(String(err && err.message ? err.message : err), [subscriptionKey, password]) + ')');
+    }
+  });
+  if (accepted) Logger.log('The gateway accepts the subscription key via: ' + accepted + '. Tell me which.');
+  else Logger.log('Every placement was refused. If any answer still says "missing", the sign-in endpoint reads the key from a name this script does not use; compare with the header or query name shown for the authenticate operation in the FastField developer portal.');
+}
+
 /** Logs a credential's summary without revealing it. `masked` shows only its ends. */
 function logSecretSummary_(label, raw, value, note) {
   if (!value) {
@@ -1385,7 +1440,11 @@ function testFastFieldDispatch() {
     } else {
       Logger.log('Sign-in failed: HTTP ' + failure.code);
       Logger.log('Reply: ' + describeFastFieldError_({ parsed: (function () { try { return JSON.parse(failure.text); } catch (_) { return null; } })(), text: failure.text }));
-      if (failure.code === 401 && /subscription key/i.test(failure.text)) {
+      if (failure.code === 401 && /missing subscription key/i.test(failure.text)) {
+        Logger.log('The gateway reports NO subscription key on the sign-in request. The request was sent with these header names: ' +
+          'Authorization, Ocp-Apim-Subscription-Key (' + config.FASTFIELD_SUBSCRIPTION_KEY.length + ' characters), Content-Type, Accept.');
+        probeFastFieldSignIn_(config.FASTFIELD_SUBSCRIPTION_KEY, config.FASTFIELD_USER_ID, config.FASTFIELD_PASSWORD);
+      } else if (failure.code === 401 && /subscription key/i.test(failure.text)) {
         Logger.log('Azure API Management (the gateway) rejected the SUBSCRIPTION KEY. Check FASTFIELD_SUBSCRIPTION_KEY.');
       } else if (failure.code === 401 || failure.code === 403) {
         Logger.log('The gateway let the subscription key through, but FastField rejected the LOGIN. Check FASTFIELD_USER_ID (the account email) and FASTFIELD_PASSWORD.');

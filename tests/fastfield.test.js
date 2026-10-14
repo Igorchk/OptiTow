@@ -33,7 +33,7 @@ function configure(env) {
 /** The requests to a FastField address, in order. */
 const calls = (env, url) => env.fetchCalls.filter((c) => c.url === url);
 const dispatches = (env) => calls(env, FF_URL);
-const signIns = (env) => calls(env, AUTH_URL);
+const signIns = (env) => env.fetchCalls.filter((c) => c.url.split('?')[0] === AUTH_URL);
 
 function appPayload(overrides = {}) {
   return Object.assign({
@@ -440,6 +440,50 @@ test('session: a failed sign-in logs the status and reply, returns null, and cac
   assert.ok(down.logs.error.some((e) => e.includes('DNS error')));
 });
 
+test('sign-in request: carries exactly Authorization, Ocp-Apim-Subscription-Key, Content-Type and Accept', () => {
+  const env = configure(makeContext());
+  env.ctx.getFastFieldSessionToken_();
+  const { url, options } = signIns(env)[0];
+  assert.equal(url, AUTH_URL, 'no key in the URL');
+  assert.deepEqual(Object.keys(options.headers).sort(), ['Accept', 'Authorization', 'Content-Type', 'Ocp-Apim-Subscription-Key']);
+  assert.equal(options.headers['Ocp-Apim-Subscription-Key'], SUB, 'present and equal to the subscription key');
+  assert.notEqual(options.headers['Ocp-Apim-Subscription-Key'], '');
+  assert.equal(options.headers.Authorization, basic(USER, PASSWORD));
+  assert.equal(options.payload, undefined);
+  assert.equal(options.contentType, undefined, 'the header carries it; no duplicate option');
+  assert.equal(options.muteHttpExceptions, true);
+});
+
+test('sign-in request: a missing or blank subscription key is warned about and nothing is sent', () => {
+  for (const blank of [undefined, '', '  ', ' "" ']) {
+    const env = configure(makeContext());
+    if (blank === undefined) delete env.props.FASTFIELD_SUBSCRIPTION_KEY; else env.props.FASTFIELD_SUBSCRIPTION_KEY = blank;
+    assert.equal(env.ctx.getFastFieldSessionToken_(), null);
+    assert.equal(env.fetchCalls.length, 0);
+    assert.ok(env.logs.warn.some((w) => w.includes('FASTFIELD_SUBSCRIPTION_KEY')), JSON.stringify(blank));
+  }
+});
+
+test('sign-in request: every FastField request after it carries the same subscription key', () => {
+  const env = configure(makeContext());
+  fastFieldServer(env);
+  env.ctx.testFastFieldDispatch();
+  assert.equal(env.fetchCalls.length, 3);
+  env.fetchCalls.forEach((c) => assert.equal(c.options.headers['Ocp-Apim-Subscription-Key'], SUB, c.url));
+  assert.equal(env.fetchCalls[0].options.headers['X-Gatekeeper-SessionToken'], undefined, 'sign-in has no session yet');
+  assert.equal(env.fetchCalls[1].options.headers['X-Gatekeeper-SessionToken'], TOKEN);
+  assert.equal(env.fetchCalls[2].options.headers['X-Gatekeeper-SessionToken'], TOKEN);
+});
+
+test('sign-in request: an exception that mentions a secret is redacted before it is logged', () => {
+  const env = configure(makeContext());
+  env.fetcher.authRespond = () => new Error('Request failed for https://x?subscription-key=' + SUB + ' as ' + PASSWORD);
+  assert.equal(env.ctx.getFastFieldSessionToken_(), null);
+  const all = env.logs.error.join('\n') + JSON.stringify(env.ctx.fastFieldSession_ || {});
+  assert.ok(!all.includes(SUB) && !all.includes(PASSWORD));
+  assert.ok(env.logs.error.some((e) => e.includes('***')));
+});
+
 test('session: missing credentials skip the sign-in without a request', () => {
   const env = makeContext();
   assert.equal(env.ctx.getFastFieldSessionToken_(), null);
@@ -625,6 +669,39 @@ test('testFastFieldDispatch: a failed sign-in says whether the gateway or the lo
   down.fetcher.authRespond = () => new Error('DNS error');
   assert.equal(down.ctx.testFastFieldDispatch(), null);
   assert.match(logText(down), /Sign-in failed before FastField answered: DNS error/);
+});
+
+test('testFastFieldDispatch: a "missing subscription key" at sign-in lists the headers sent and probes how the gateway reads it', () => {
+  const env = configure(makeContext());
+  const miss = { code: 401, body: '{"statusCode":401,"message":"Access denied due to missing subscription key. Make sure to include subscription key when making requests to an API."}' };
+  env.fetcher.authRespond = () => miss;
+  assert.equal(env.ctx.testFastFieldDispatch(), null);
+  assert.equal(signIns(env).length, 4, 'the real sign-in, then three probes');
+  assert.ok(env.fetchCalls.every((c) => c.url.startsWith(AUTH_URL)), 'nothing else is tried');
+  const [, headerOnly, queryOnly, both] = signIns(env);
+  assert.equal(headerOnly.options.headers['Ocp-Apim-Subscription-Key'], SUB);
+  assert.equal(headerOnly.url, AUTH_URL);
+  assert.equal(queryOnly.url, AUTH_URL + '?subscription-key=' + SUB);
+  assert.equal(queryOnly.options.headers['Ocp-Apim-Subscription-Key'], undefined);
+  assert.equal(both.url, AUTH_URL + '?subscription-key=' + SUB);
+  assert.equal(both.options.headers['Ocp-Apim-Subscription-Key'], SUB);
+  const log = logText(env);
+  assert.match(log, /NO subscription key on the sign-in request[\s\S]*Authorization, Ocp-Apim-Subscription-Key \(32 characters\), Content-Type, Accept/);
+  assert.match(log, /Ocp-Apim-Subscription-Key header \(headers sent: Authorization, Ocp-Apim-Subscription-Key, Accept\): HTTP 401/);
+  assert.match(log, /Every placement was refused/);
+  noSecrets(env);
+});
+
+test('testFastFieldDispatch: the sign-in probe reports a placement the gateway accepts', () => {
+  const env = configure(makeContext());
+  env.fetcher.authRespond = (url) => (url.includes('subscription-key=')
+    ? { code: 200, body: JSON.stringify({ sessionToken: TOKEN }) }
+    : { code: 401, body: '{"message":"Access denied due to missing subscription key."}' });
+  assert.equal(env.ctx.testFastFieldDispatch(), null);
+  const log = logText(env);
+  assert.match(log, /\?subscription-key= query parameter[^\n]*HTTP 200 \(accepted: a session was issued\)/);
+  assert.match(log, /The gateway accepts the subscription key via: \?subscription-key= query parameter/);
+  noSecrets(env);
 });
 
 test('testFastFieldDispatch: a missing setting sends nothing', () => {

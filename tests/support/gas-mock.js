@@ -120,7 +120,7 @@ function makeContext(seed) {
     UrlFetchApp: {
       fetch: (url, options) => {
         fetchCalls.push({ url, options, lockHeld: lock.held });
-        const answer = String(url).endsWith('/v3/authenticate') ? fetcher.authRespond(url, options) : fetcher.respond(url, options);
+        const answer = String(url).split('?')[0].endsWith('/v3/authenticate') ? fetcher.authRespond(url, options) : fetcher.respond(url, options);
         if (answer instanceof Error) throw answer;
         return {
           getResponseCode: () => answer.code,
