@@ -20,7 +20,7 @@ struct MileageCalculatorView: View {
                 VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
                     FormSection(title: "Route") {
                         FieldGroup(label: "Start Location") {
-                            AddressField(label: "Start location", placeholder: "Tap to enter start location (default: yard)",
+                            AddressField(label: "Start location", placeholder: "Default: Yard",
                                          text: $startText, entry: $start,
                                          manualStatus: "Manual start — mileage uses the yard",
                                          manualRowTitle: "Use as typed — mileage uses the yard")

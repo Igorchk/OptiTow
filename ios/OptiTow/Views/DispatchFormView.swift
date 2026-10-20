@@ -246,7 +246,7 @@ struct DispatchFormView: View {
                              text: $draft.dropoff_address, entry: $draft.dropoff_entry)
             }
             FieldGroup(label: "Start Location") {
-                AddressField(label: "Start location", placeholder: "Tap to enter start location (default: yard)",
+                AddressField(label: "Start location", placeholder: "Default: Yard",
                              text: $draft.start_location, entry: $draft.start_entry,
                              manualStatus: "Manual start — mileage uses the yard",
                              manualRowTitle: "Use as typed — mileage uses the yard")
