@@ -41,6 +41,9 @@ struct AddressSearchSheet: View {
             header
             results
         }
+        // On a wide window (iPad full screen or a Stage Manager window) the search stays a readable
+        // column; the canvas behind it still fills the sheet.
+        .readableWidth()
         .themedCanvas()
         .presentationDragIndicator(.visible)
         .task {

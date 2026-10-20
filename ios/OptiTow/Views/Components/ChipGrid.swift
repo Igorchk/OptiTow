@@ -11,8 +11,12 @@ struct ChipGrid: View {
     @ScaledMetric(relativeTo: .headline) private var scale = 1.0
 
     var body: some View {
+        // Columns are as many as fit the container, so a wide iPad column gets more per row and a
+        // phone the same two or three as before. Chips stop growing at 1.6x their minimum, so a
+        // short list in a wide column does not stretch into long bars.
         LazyVGrid(
-            columns: [GridItem(.adaptive(minimum: minChipWidth * scale), spacing: Theme.Spacing.grid)],
+            columns: [GridItem(.adaptive(minimum: minChipWidth * scale, maximum: minChipWidth * scale * 1.6),
+                               spacing: Theme.Spacing.grid)],
             spacing: Theme.Spacing.grid
         ) {
             ForEach(options, id: \.self) { option in
