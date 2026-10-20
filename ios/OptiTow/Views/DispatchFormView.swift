@@ -181,9 +181,8 @@ struct DispatchFormView: View {
             FieldGroup(label: "Caller Type") {
                 ChipGrid(options: ChipOptions.callerType, selection: $draft.caller_type)
             }
-            FieldGroup(label: "Payer") {
-                ChipGrid(options: ChipOptions.payerName, selection: $draft.payer_name, minChipWidth: 105)
-            }
+            AdaptiveDropdownPicker(title: "Payer", options: ChipOptions.payerName, text: $draft.payer_name,
+                                   placeholder: "Select payer")
         }
     }
 
