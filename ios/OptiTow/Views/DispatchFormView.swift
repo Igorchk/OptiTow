@@ -3,6 +3,9 @@ import SwiftUI
 /// The single screen: capture one call, save it to the offline queue, start the next.
 struct DispatchFormView: View {
     @Environment(SyncManager.self) private var sync
+    /// Regular on an iPad window wide enough for two columns (full screen, or the wide Split View /
+    /// Stage Manager sizes); compact on every iPhone, Slide Over and a narrow Split View.
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     @AppStorage(AppTheme.storageKey) private var theme: AppTheme = .standard
     @State private var draft = CallDraft()
@@ -45,22 +48,10 @@ struct DispatchFormView: View {
                     // The scroll anchor lives outside the re-identified form so scrollTo
                     // still finds it after a save swaps the form's identity.
                     Color.clear.frame(height: 0).id("top")
-                    VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
-                        callerSection
-                        jobSection
-                        vehicleSection
-                        locationSection
-                        TripMileageCard(state: trip.state, onRetry: trip.retry)
-                        if let map = trip.map {
-                            RouteMapPreviewCard(map: map, isLoading: trip.state == .loading)
-                        }
-                        quoteSection
-                        outcomeSection
-                        notesSection
-                    }
-                    .padding(Theme.Spacing.md)
-                    // New call_id => fresh child state (e.g. "Other" text fields collapse).
-                    .id(draft.call_id)
+                    formContent
+                        .padding(Theme.Spacing.md)
+                        // New call_id => fresh child state (e.g. "Other" text fields collapse).
+                        .id(draft.call_id)
                 }
                 .scrollDismissesKeyboard(.interactively)
                 .themedCanvas()
@@ -123,6 +114,55 @@ struct DispatchFormView: View {
         .sensoryFeedback(.impact(weight: .light), trigger: theme)
         // Outermost, so the toolbar, the sheets and every card read the same theme.
         .environment(\.appTheme, theme)
+    }
+
+    // MARK: - Layout
+
+    /// The cards: one column on a phone, and two on a wide iPad window. The left column is what the
+    /// caller says (who, what, which vehicle, notes); the right is where and how much (route, quote,
+    /// outcome and Save), so the Save button sits under the result, not at the end of a long scroll.
+    @ViewBuilder
+    private var formContent: some View {
+        if horizontalSizeClass == .regular {
+            HStack(alignment: .top, spacing: Theme.Spacing.lg) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
+                    callerSection
+                    jobSection
+                    vehicleSection
+                    notesSection
+                }
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+                VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
+                    locationSection
+                    tripSection
+                    quoteSection
+                    outcomeSection
+                }
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+            .readableWidth(AdaptiveLayout.twoColumnMaxWidth)
+        } else {
+            VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
+                callerSection
+                jobSection
+                vehicleSection
+                locationSection
+                tripSection
+                quoteSection
+                outcomeSection
+                notesSection
+            }
+            .readableWidth()
+        }
+    }
+
+    /// Mileage, and the map once there are stops to draw.
+    @ViewBuilder
+    private var tripSection: some View {
+        TripMileageCard(state: trip.state, onRetry: trip.retry)
+        if let map = trip.map {
+            RouteMapPreviewCard(map: map, isLoading: trip.state == .loading)
+        }
     }
 
     // MARK: - Sections

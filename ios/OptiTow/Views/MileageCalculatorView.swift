@@ -41,6 +41,7 @@ struct MileageCalculatorView: View {
                     }
                 }
                 .padding(Theme.Spacing.md)
+                .readableWidth()
             }
             .scrollDismissesKeyboard(.interactively)
             // Short content still bounces, so a drag dismisses the keyboard and reveals the result.
