@@ -178,9 +178,8 @@ struct DispatchFormView: View {
                         .disabled(location.state == .preparing)
                 }
             }
-            FieldGroup(label: "Caller Type") {
-                ChipGrid(options: ChipOptions.callerType, selection: $draft.caller_type)
-            }
+            AdaptiveDropdownPicker(title: "Caller Type", options: ChipOptions.callerType, text: $draft.caller_type,
+                                   placeholder: "Select caller type")
             AdaptiveDropdownPicker(title: "Payer", options: ChipOptions.payerName, text: $draft.payer_name,
                                    placeholder: "Select payer")
         }
@@ -188,9 +187,8 @@ struct DispatchFormView: View {
 
     private var jobSection: some View {
         FormSection(title: "Job") {
-            FieldGroup(label: "Service") {
-                ChipGrid(options: ChipOptions.serviceRequested, selection: $draft.service_requested)
-            }
+            AdaptiveDropdownPicker(title: "Service", options: ChipOptions.serviceRequested,
+                                   text: $draft.service_requested, placeholder: "Select service")
         }
     }
 
@@ -199,41 +197,42 @@ struct DispatchFormView: View {
             FieldGroup(label: "Year") {
                 BigTextField(label: "Vehicle year", placeholder: "2021", text: $draft.vehicle_year, keyboard: .number)
             }
-            FieldGroup(label: "Make") {
-                ChipGridWithOther(options: catalog.entries.map(\.make), value: $draft.vehicle_make,
-                                  otherPlaceholder: "Make", minChipWidth: 105)
-            }
-            FieldGroup(label: "Model") {
-                modelPicker
-            }
-            FieldGroup(label: "Drivetrain") {
-                ChipGrid(options: ChipOptions.drivetrain, selection: $draft.drivetrain, minChipWidth: 105)
-            }
-            FieldGroup(label: "Condition") {
-                ChipGrid(options: ChipOptions.vehicleCondition, selection: $draft.vehicle_condition)
-            }
+            AdaptiveDropdownPickerWithOther(title: "Make", options: catalog.entries.map(\.make),
+                                            value: $draft.vehicle_make, placeholder: "Select make",
+                                            otherPlaceholder: "Make")
+            modelPicker
+            AdaptiveDropdownPicker(title: "Drivetrain", options: ChipOptions.drivetrain, text: $draft.drivetrain,
+                                   placeholder: "Select drivetrain")
+            AdaptiveDropdownPicker(title: "Condition", options: ChipOptions.vehicleCondition,
+                                   text: $draft.vehicle_condition, placeholder: "Select condition")
         }
     }
 
+    /// The model list follows the chosen make. A make with no models on file gets a plain text field,
+    /// and with no make yet there is only a hint.
     @ViewBuilder
     private var modelPicker: some View {
         let models = catalog.models(for: draft.vehicle_make)
         if !models.isEmpty {
-            ChipGridWithOther(options: models, value: $draft.vehicle_model,
-                              otherPlaceholder: "Model", minChipWidth: 105)
+            AdaptiveDropdownPickerWithOther(title: "Model", options: models, value: $draft.vehicle_model,
+                                            placeholder: "Select model", otherPlaceholder: "Model")
+                // A new make is a new list: start the Other field and its state over.
                 .id(draft.vehicle_make)
-        } else if !draft.vehicle_make.isEmpty {
-            BigTextField(label: "Model", placeholder: "Model", text: $draft.vehicle_model)
         } else {
-            Text("Pick a make to see its models").metadata()
+            FieldGroup(label: "Model") {
+                if !draft.vehicle_make.isEmpty {
+                    BigTextField(label: "Model", placeholder: "Model", text: $draft.vehicle_model)
+                } else {
+                    Text("Pick a make to see its models").metadata()
+                }
+            }
         }
     }
 
     private var locationSection: some View {
         FormSection(title: "Location") {
-            FieldGroup(label: "Scene") {
-                ChipGrid(options: ChipOptions.sceneLocation, selection: $draft.scene_location)
-            }
+            AdaptiveDropdownPicker(title: "Scene", options: ChipOptions.sceneLocation,
+                                   text: $draft.scene_location, placeholder: "Select scene")
             FieldGroup(label: "Pickup Address") {
                 AddressField(label: "Pickup address", placeholder: "Tap to enter pickup address",
                              text: $draft.pickup_address, entry: $draft.pickup_entry)
@@ -269,9 +268,8 @@ struct DispatchFormView: View {
             FormSection(title: "Outcome") {
                 OutcomeToggle(outcome: $draft.outcome)
                 if draft.isLost {
-                    FieldGroup(label: "Why did they decline?") {
-                        ChipGrid(options: ChipOptions.declineReason, selection: $draft.decline_reason)
-                    }
+                    AdaptiveDropdownPicker(title: "Why did they decline?", options: ChipOptions.declineReason,
+                                           text: $draft.decline_reason, placeholder: "Select a reason")
                     .transition(.opacity.combined(with: .move(edge: .top)))
                 }
             }

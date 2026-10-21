@@ -153,6 +153,61 @@ extension AdaptiveDropdownPicker where Option == String {
     }
 }
 
+// MARK: - With an "Other" entry
+
+/// A dropdown whose last entry is "Other", which reveals a free-text field below it, for lists that
+/// cannot be exhaustive (vehicle makes and models). It keeps `ChipGridWithOther`'s behavior: choosing
+/// "Other" clears the value for the dispatcher to type; typing sets it; picking a listed option, or
+/// clearing, hides the field.
+struct AdaptiveDropdownPickerWithOther: View {
+    static var otherLabel: String { ChipGridWithOther.otherLabel }
+
+    let title: String
+    let options: [String]
+    @Binding var value: String
+    var placeholder = "Select"
+    let otherPlaceholder: String
+    var isSearchable: Bool?
+
+    @State private var isOther: Bool
+
+    init(title: String, options: [String], value: Binding<String>, placeholder: String = "Select",
+         otherPlaceholder: String, isSearchable: Bool? = nil) {
+        self.title = title
+        self.options = options
+        self._value = value
+        self.placeholder = placeholder
+        self.otherPlaceholder = otherPlaceholder
+        self.isSearchable = isSearchable
+        let current = value.wrappedValue
+        self._isOther = State(initialValue: !current.isEmpty && !options.contains(current))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.grid) {
+            AdaptiveDropdownPicker(title: title, options: options + [Self.otherLabel], selection: selection,
+                                   placeholder: placeholder, isSearchable: isSearchable)
+            if isOther {
+                BigTextField(label: otherPlaceholder, placeholder: otherPlaceholder, text: $value)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .themeAnimation(value: isOther)
+    }
+
+    private var selection: Binding<String?> {
+        Binding(
+            get: { isOther ? Self.otherLabel : (options.contains(value) ? value : nil) },
+            set: { newValue in
+                // Choosing "Other" again must not wipe what was already typed.
+                if newValue == Self.otherLabel, isOther { return }
+                isOther = newValue == Self.otherLabel
+                value = isOther ? "" : (newValue ?? "")
+            }
+        )
+    }
+}
+
 // MARK: - Searchable list
 
 /// The list behind a long dropdown: a search field pinned under the title, the options filtered as
@@ -231,6 +286,7 @@ private struct DropdownGallery: View {
     @State private var empty: String?
     @State private var make: String? = "Tesla"
     @State private var forced: String?
+    @State private var otherMake = ""
 
     private static let makes = ["Toyota", "Honda", "Ford", "Chevrolet", "Nissan", "Hyundai", "Kia", "Jeep", "Subaru",
                                 "Tesla", "BMW", "Mercedes-Benz", "Volkswagen", "Ram", "GMC"]
@@ -247,6 +303,10 @@ private struct DropdownGallery: View {
                 FormSection(title: "Searchable (15 options)") {
                     AdaptiveDropdownPicker(title: "Make", options: Self.makes, selection: $make,
                                            placeholder: "Select make")
+                }
+                FormSection(title: "With Other (searchable)") {
+                    AdaptiveDropdownPickerWithOther(title: "Make", options: Self.makes, value: $otherMake,
+                                                    placeholder: "Select make", otherPlaceholder: "Make")
                 }
                 FormSection(title: "Searchable by override (4 options)") {
                     AdaptiveDropdownPicker(title: "Service", options: Array(ChipOptions.serviceRequested.prefix(4)),
