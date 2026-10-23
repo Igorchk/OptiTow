@@ -1,6 +1,7 @@
 import Foundation
 import Network
 import Observation
+import OSLog
 import SwiftData
 #if canImport(UIKit)
 import UIKit
@@ -25,7 +26,13 @@ final class SyncManager {
     private(set) var status: Status = .idle
     private(set) var pendingCount = 0
     private(set) var rejectedCount = 0
+    /// Calls parked after repeated server errors: they need someone to look at them.
+    private(set) var parkedCount = 0
     private(set) var isOnline = false
+
+    /// A call is parked once it has failed with a server error more than this many times in a row.
+    static let maxServerFaults = 5
+    private static let log = Logger(subsystem: "com.optitow.dispatcher", category: "sync")
 
     private let context: ModelContext
     private let config: AppConfig?
@@ -84,6 +91,7 @@ final class SyncManager {
                 record.isSynced = true
                 record.syncedAt = .now
                 record.lastSyncError = nil
+                record.attemptCount = 0
                 consecutiveFailures = 0
             case .reject(let message):
                 record.isRejected = true
@@ -99,13 +107,47 @@ final class SyncManager {
                 persist()
                 scheduleRetry(reason: message)
                 return
+            case .serverFault(let message):
+                record.syncAttempts += 1
+                record.attemptCount += 1
+                record.lastSyncError = message
+                if record.attemptCount > Self.maxServerFaults {
+                    park(record, after: message)
+                    persist()
+                    continue  // the calls behind it are not held up
+                }
+                persist()
+                scheduleRetry(reason: message)
+                return
             }
             persist()
         }
         status = isOnline ? .idle : .offline
     }
 
+    /// Puts parked calls back in the queue, with a fresh count, and sends them.
+    func retryParked() {
+        let parked = (try? context.fetch(FetchDescriptor<CallRecord>(predicate: #Predicate { $0.isParked }))) ?? []
+        guard !parked.isEmpty else { return }
+        for record in parked {
+            record.isParked = false
+            record.isRejected = false
+            record.attemptCount = 0
+        }
+        persist()
+        refreshCounts()
+        Task { await drain() }
+    }
+
     // MARK: - Private
+
+    /// Takes a call out of the queue for good (until someone retries it), with the reason kept on it.
+    private func park(_ record: CallRecord, after message: String) {
+        record.isRejected = true
+        record.isParked = true
+        record.lastSyncError = "Parked after \(record.attemptCount) server errors in a row. Last: \(message)"
+        Self.log.error("Parked a call after \(record.attemptCount, privacy: .public) server errors: \(message, privacy: .private) (call \(record.call_id, privacy: .private))")
+    }
 
     private func networkChanged(online: Bool) {
         isOnline = online
@@ -146,7 +188,10 @@ final class SyncManager {
             predicate: #Predicate { !$0.isSynced && !$0.isRejected }
         ))) ?? 0
         rejectedCount = (try? context.fetchCount(FetchDescriptor<CallRecord>(
-            predicate: #Predicate { $0.isRejected }
+            predicate: #Predicate { $0.isRejected && !$0.isParked }
+        ))) ?? 0
+        parkedCount = (try? context.fetchCount(FetchDescriptor<CallRecord>(
+            predicate: #Predicate { $0.isParked }
         ))) ?? 0
     }
 

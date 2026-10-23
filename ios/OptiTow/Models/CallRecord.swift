@@ -31,7 +31,15 @@ final class CallRecord {
     var isSynced: Bool
     /// The server answered BAD_REQUEST; retrying the same payload can't succeed.
     var isRejected: Bool
+    /// Parked rather than rejected by the server: it kept answering with a server error (not a refusal
+    /// of this payload), so the app gave up on it and moved on. Always also `isRejected`, which is what
+    /// takes it out of the queue. The dispatcher can put it back with "Retry parked calls".
+    var isParked: Bool = false
+    /// Every transient retry, whatever the cause (offline, busy, a server error).
     var syncAttempts: Int
+    /// Consecutive server errors (INTERNAL or an unclassified code) for this call; a success resets it.
+    /// Offline and busy retries do not count, so only a call that keeps failing the server gets parked.
+    var attemptCount: Int = 0
     var lastSyncError: String?
     var createdAt: Date
     var syncedAt: Date?
@@ -58,7 +66,9 @@ final class CallRecord {
         notes_comments = draft.notes_comments
         isSynced = false
         isRejected = false
+        isParked = false
         syncAttempts = 0
+        attemptCount = 0
         lastSyncError = nil
         createdAt = .now
         syncedAt = nil

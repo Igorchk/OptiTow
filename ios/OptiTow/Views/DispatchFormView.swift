@@ -20,6 +20,13 @@ struct DispatchFormView: View {
     @State private var locationMessage: LocationMessage?
     /// Bumped after a save; the scroll view returns to the top for the next call.
     @State private var scrollTopTick = 0
+    /// Set when the local store was recovered at launch; the banner stays until it is dismissed.
+    let storeRecovery: StoreRecovery?
+    @State private var showStoreRecovery = true
+
+    init(storeRecovery: StoreRecovery? = nil) {
+        self.storeRecovery = storeRecovery
+    }
 
     private let catalog = VehicleCatalog.shared
 
@@ -63,6 +70,12 @@ struct DispatchFormView: View {
             .navigationBarTitleDisplayMode(.inline)
             #endif
             .toolbar { toolbarContent }
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if let storeRecovery, showStoreRecovery {
+                    StoreRecoveryBanner(recovery: storeRecovery) { withAnimation { showStoreRecovery = false } }
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
+            }
             .overlay(alignment: .top) { savedBanner }
         }
         .sensoryFeedback(.success, trigger: savedCount)
@@ -429,7 +442,7 @@ private struct DispatchFormPreview: View {
     }()
 
     var body: some View {
-        DispatchFormView()
+        DispatchFormView(storeRecovery: nil)
             .environment(SyncManager(context: Self.container.mainContext, config: nil))
             .modelContainer(Self.container)
     }

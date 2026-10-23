@@ -27,13 +27,16 @@ struct SyncPresentation: Equatable {
     var message: String
     var pending: Int
     var rejected: Int
+    /// Calls the app gave up on after repeated server errors: they need attention.
+    var parked: Int
     var canRetry: Bool
 
+    var showsRetryParked: Bool { parked > 0 && kind != .needsSetup }
     var showsRetry: Bool { kind != .synced && kind != .needsSetup }
     var retryTitle: String { kind == .syncing ? "Syncing…" : "Retry Sync" }
 
     init(kind: Kind, badgeTitle: String, symbol: String, tone: Theme.Tone, headline: String,
-         message: String, pending: Int = 0, rejected: Int = 0, canRetry: Bool = false) {
+         message: String, pending: Int = 0, rejected: Int = 0, parked: Int = 0, canRetry: Bool = false) {
         self.kind = kind
         self.badgeTitle = badgeTitle
         self.symbol = symbol
@@ -42,10 +45,11 @@ struct SyncPresentation: Equatable {
         self.message = message
         self.pending = pending
         self.rejected = rejected
+        self.parked = parked
         self.canRetry = canRetry
     }
 
-    init(status: SyncManager.Status, pending: Int, rejected: Int, isOnline: Bool, isConfigured: Bool) {
+    init(status: SyncManager.Status, pending: Int, rejected: Int, parked: Int = 0, isOnline: Bool, isConfigured: Bool) {
         let calls = Self.calls(pending)
         let safe = "Your calls are saved on this phone."
 
@@ -106,15 +110,30 @@ struct SyncPresentation: Equatable {
                 p.message += " " + note
             }
         }
+        if parked > 0 {
+            let note = "\(Self.capitalized(Self.calls(parked))) need\(parked == 1 ? "s" : "") attention: the server kept failing on "
+                + "\(parked == 1 ? "it" : "them"), so the app parked \(parked == 1 ? "it" : "them") and moved on to the rest. "
+                + "\(parked == 1 ? "It is" : "They are") still saved on this phone."
+            if p.kind == .synced && rejected == 0 {
+                p.badgeTitle = "\(parked) need attention"
+                p.symbol = "exclamationmark.octagon.fill"
+                p.tone = .danger
+                p.headline = "Some calls need attention"
+                p.message = "All other calls are on the sheet. " + note
+            } else {
+                p.message += " " + note
+            }
+        }
         p.pending = pending
         p.rejected = rejected
+        p.parked = parked
         self = p
     }
 
     @MainActor
     init(sync: SyncManager, isConfigured: Bool) {
         self.init(status: sync.status, pending: sync.pendingCount, rejected: sync.rejectedCount,
-                  isOnline: sync.isOnline, isConfigured: isConfigured)
+                  parked: sync.parkedCount, isOnline: sync.isOnline, isConfigured: isConfigured)
     }
 
     private static func calls(_ n: Int) -> String { n == 1 ? "1 call" : "\(n) calls" }

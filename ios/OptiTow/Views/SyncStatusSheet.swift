@@ -12,6 +12,8 @@ struct SyncStatusSheet: View {
     var body: some View {
         SyncStatusContent(state: SyncPresentation(sync: sync, isConfigured: isConfigured)) {
             Task { await sync.drain() }
+        } onRetryParked: {
+            sync.retryParked()
         }
         .onPreferenceChange(ContentHeightKey.self) { contentHeight = $0 }
         // Room for the drag indicator and the home-indicator safe area, which the content doesn't measure.
@@ -31,6 +33,7 @@ private struct ContentHeightKey: PreferenceKey {
 struct SyncStatusContent: View {
     let state: SyncPresentation
     let onRetry: () -> Void
+    var onRetryParked: () -> Void = {}
 
     var body: some View {
         ScrollView {
@@ -47,18 +50,27 @@ struct SyncStatusContent: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                if state.pending > 0 || state.rejected > 0 {
+                if state.pending > 0 || state.rejected > 0 || state.parked > 0 {
                     SurfaceCard {
                         VStack(spacing: Theme.Spacing.sm) {
                             if state.pending > 0 {
                                 countRow("Waiting to send", state.pending, tone: .warning)
                             }
-                            if state.pending > 0 && state.rejected > 0 { Divider() }
+                            if state.pending > 0 && (state.rejected > 0 || state.parked > 0) { Divider() }
                             if state.rejected > 0 {
                                 countRow("Rejected by server", state.rejected, tone: .danger)
                             }
+                            if state.rejected > 0 && state.parked > 0 { Divider() }
+                            if state.parked > 0 {
+                                countRow("Parked: needs attention", state.parked, tone: .danger)
+                            }
                         }
                     }
+                }
+
+                if state.showsRetryParked {
+                    ActionPillButton("Retry Parked Calls", systemImage: "arrow.uturn.backward", kind: .secondary,
+                                     action: onRetryParked)
                 }
 
                 if state.showsRetry {
@@ -104,6 +116,8 @@ struct SyncStatesGallery: View {
         SyncPresentation(status: .retrying("The sheet is busy"), pending: 2, rejected: 0, isOnline: true, isConfigured: true),
         SyncPresentation(status: .error("The webhook rejected the secret."), pending: 2, rejected: 1, isOnline: true, isConfigured: true),
         SyncPresentation(status: .idle, pending: 0, rejected: 2, isOnline: true, isConfigured: true),
+        SyncPresentation(status: .idle, pending: 0, rejected: 0, parked: 2, isOnline: true, isConfigured: true),
+        SyncPresentation(status: .retrying("The sheet is busy"), pending: 3, rejected: 1, parked: 1, isOnline: true, isConfigured: true),
         SyncPresentation(status: .error("Secrets.plist missing or invalid."), pending: 4, rejected: 0, isOnline: true, isConfigured: false),
     ]
 
