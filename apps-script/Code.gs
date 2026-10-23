@@ -1253,10 +1253,9 @@ function fastFieldProblem_(callData) {
   return FASTFIELD_PROBLEMS.BREAK_DOWN;
 }
 
-// Year and ZIP default to FastField Numeric fields, which display with thousands commas (2,022 and
-// 95,678) and cannot be set otherwise. If the form's fields are swapped for Text or Formatted Input
-// ones, these Script Properties name the new keys; a key that does not start with "numeric" is sent
-// as text.
+// Year and both ZIPs are Formatted Input fields on the form (masks #### and #####) that kept the keys
+// numeric_1, numeric_2 and numeric_3, so their values go as text. If the form's fields are ever moved,
+// these Script Properties name the new keys; the value is text for any key.
 const FASTFIELD_NUMBER_FIELDS = Object.freeze({
   year: { property: 'FASTFIELD_YEAR_FIELD', key: 'numeric_1' },
   pickupZip: { property: 'FASTFIELD_PICKUP_ZIP_FIELD', key: 'numeric_2' },
@@ -1270,11 +1269,33 @@ function fastFieldNumberKey_(name) {
   return /^[A-Za-z][A-Za-z0-9_]*$/.test(configured) ? configured : field.key;
 }
 
-/** A year or ZIP for `key`: a number for a numeric field, else its digits as text. '' / null when there is none. */
-function fastFieldNumberValue_(key, value, emptyNumeric) {
-  const isNumeric = /^numeric/i.test(key);
-  if (value === null || value === undefined || value === '') return isNumeric ? emptyNumeric : '';
-  return isNumeric ? Number(value) : String(value);
+/** A year or ZIP as the Formatted Input field wants it: its digits as text, '' when there is none. */
+function fastFieldNumberValue_(value) {
+  return value === null || value === undefined || value === '' ? '' : String(value);
+}
+
+// The app's services that the form's Service Performed list (listpicker_2) does not have, with the
+// list value they go as. "Flatbed / Specialty" is a Standard Tow as far as the driver's form goes.
+const FASTFIELD_SERVICE_MAP = Object.freeze({ 'Flatbed / Specialty': 'Standard Tow' });
+
+/** The Service Performed list value for the service the dispatcher chose. */
+function fastFieldService_(service) {
+  const text = service === undefined || service === null ? '' : String(service).trim();
+  return Object.prototype.hasOwnProperty.call(FASTFIELD_SERVICE_MAP, text) ? FASTFIELD_SERVICE_MAP[text] : text;
+}
+
+/**
+ * A coordinate pair as the form writes it, "lat, lng": from a string already in that form, or from
+ * { lat, lng } (or latitude / longitude) numbers. '' when there is no usable pair.
+ */
+function fastFieldCoordinates_(value) {
+  if (value === undefined || value === null) return '';
+  if (typeof value === 'string') return value.trim();
+  if (typeof value !== 'object') return '';
+  const lat = Number(value.lat !== undefined ? value.lat : value.latitude);
+  const lng = Number(value.lng !== undefined ? value.lng : (value.lon !== undefined ? value.lon : value.longitude));
+  if (!isFinite(lat) || !isFinite(lng)) return '';
+  return lat.toFixed(6) + ', ' + lng.toFixed(6);
 }
 
 /** The merge fields that pre-fill the job, by FastField field key. */
@@ -1296,17 +1317,23 @@ function fastFieldMergeFields_(callData) {
   };
   const yearKey = fastFieldNumberKey_('year');
   const year = Number(callData.vehicle_year) || null;
-  fields[yearKey] = fastFieldNumberValue_(yearKey, year, null);
+  fields[yearKey] = fastFieldNumberValue_(year);
   const pickupZipKey = fastFieldNumberKey_('pickupZip');
   const dropoffZipKey = fastFieldNumberKey_('dropoffZip');
-  if (pickup.zip !== null) fields[pickupZipKey] = fastFieldNumberValue_(pickupZipKey, pickup.zip);
+  if (pickup.zip !== null) fields[pickupZipKey] = fastFieldNumberValue_(pickup.zip);
   fields.alpha_13 = dropoff.street;
   fields.alpha_14 = dropoff.city;
   fields.alpha_15 = dropoff.state;
-  if (dropoff.zip !== null) fields[dropoffZipKey] = fastFieldNumberValue_(dropoffZipKey, dropoff.zip);
+  if (dropoff.zip !== null) fields[dropoffZipKey] = fastFieldNumberValue_(dropoff.zip);
   fields.listpicker_1 = fastFieldProblem_(callData);
-  fields.listpicker_2 = text(callData.service_requested);
+  fields.listpicker_2 = fastFieldService_(callData.service_requested);
   fields.numeric_4 = Number(callData.quoted_price) || 0;
+  // The form's hidden Pickup / Dropoff Coordinates fields. FastField fills them itself from the
+  // driver's GPS fields, so this only passes along coordinates a record already carries.
+  const pickupCoords = fastFieldCoordinates_(callData.pickup_coords);
+  const dropoffCoords = fastFieldCoordinates_(callData.dropoff_coords);
+  if (pickupCoords) fields.alpha_16 = pickupCoords;
+  if (dropoffCoords) fields.alpha_17 = dropoffCoords;
   return fields;
 }
 
@@ -1383,6 +1410,15 @@ function redactHeaders_(headers) {
 }
 
 /**
+ * Whether the diagnostics may run: the route, the user-list probes, the recipient-format sweep and
+ * the sign-in probe. Off unless the Script Property ALLOW_DIAGNOSTICS is "true", so the deployed web
+ * app never runs them; turn it on while debugging and off again after.
+ */
+function diagnosticsAllowed_() {
+  return getScriptProperty_('ALLOW_DIAGNOSTICS').toLowerCase() === 'true';
+}
+
+/**
  * GET ?action=test_fastfield&token=<API_SECRET>[&step=3 | &from=N&count=M]: runs testFastFieldDispatch and returns everything it
  * did as JSON: the lines it logged, and each FastField request's status, response headers and parsed
  * body. No secret appears in it (keys and the password are never logged; session tokens and cookies
@@ -1391,7 +1427,8 @@ function redactHeaders_(headers) {
 function fastFieldTestRoute_(params) {
   const expected = getScriptProperty_('API_SECRET');
   const token = String(params.token === undefined || params.token === null ? '' : params.token);
-  if (!expected || !token || !safeEqual_(token, expected)) {
+  // Disabled looks exactly like a wrong token, so a deployment does not reveal that the route exists.
+  if (!diagnosticsAllowed_() || !expected || !token || !safeEqual_(token, expected)) {
     return json_({ ok: false, code: 'UNAUTHORIZED', error: 'UNAUTHORIZED' });
   }
   fastFieldTrace_ = { requests: [], log: [] };
@@ -1600,6 +1637,10 @@ function describeKey_(raw, key) {
  * NAMES that were sent are listed, never the values.
  */
 function probeFastFieldSignIn_(subscriptionKey, user, password) {
+  if (!diagnosticsAllowed_()) {
+    diag_('Sign-in probing is off (ALLOW_DIAGNOSTICS is not "true").');
+    return;
+  }
   const basicAuth = 'Basic ' + Utilities.base64Encode(user + ':' + password);
   const url = CONFIG.FASTFIELD_AUTH_URL;
   const withQuery = url + (url.indexOf('?') === -1 ? '?' : '&') + 'subscription-key=' + encodeURIComponent(subscriptionKey);
@@ -1736,10 +1777,15 @@ function testFastFieldDispatch(options) {
     }
   }
 
-  diag_('Step 3 of 4: finding the recipient (GET ' + CONFIG.FASTFIELD_USERS_URL + ')');
-  const found = discoverFastFieldUser_(config, token);
-  const groups = fastFieldGet_(CONFIG.FASTFIELD_USERGROUPS_URL, getFastFieldHeaders_(config.FASTFIELD_SUBSCRIPTION_KEY, token));
-  diag_('User groups (GET ' + CONFIG.FASTFIELD_USERGROUPS_URL + '): ' + (groups.error ? 'request failed (' + groups.error + ')' : 'HTTP ' + groups.code + ' ' + groups.text.slice(0, 500)));
+  let found = null;
+  if (diagnosticsAllowed_()) {
+    diag_('Step 3 of 4: finding the recipient (GET ' + CONFIG.FASTFIELD_USERS_URL + ')');
+    found = discoverFastFieldUser_(config, token);
+    const groups = fastFieldGet_(CONFIG.FASTFIELD_USERGROUPS_URL, getFastFieldHeaders_(config.FASTFIELD_SUBSCRIPTION_KEY, token));
+    diag_('User groups (GET ' + CONFIG.FASTFIELD_USERGROUPS_URL + '): ' + (groups.error ? 'request failed (' + groups.error + ')' : 'HTTP ' + groups.code + ' ' + groups.text.slice(0, 500)));
+  } else {
+    diag_('Step 3 of 4: skipped. Listing users and groups is off (ALLOW_DIAGNOSTICS is not "true").');
+  }
 
   if (options.stopAfterStep === 3) {
     diag_('Stopped after step 3 as requested.');
@@ -1848,6 +1894,7 @@ function isRecipientNotFound_(result) {
  * Never fatal: a failure is logged and the dispatch test goes on.
  */
 function discoverFastFieldUser_(config, sessionToken) {
+  if (!diagnosticsAllowed_()) return null;
   const response = fastFieldGet_(CONFIG.FASTFIELD_USERS_URL, getFastFieldHeaders_(config.FASTFIELD_SUBSCRIPTION_KEY, sessionToken));
   if (response.error) {
     diag_('Users request failed before FastField answered: ' + response.error);
@@ -1888,6 +1935,10 @@ function discoverFastFieldUser_(config, sessionToken) {
  * answer with that same error. Whatever it accepts creates a real test task.
  */
 function tryFastFieldRecipientFormats_(config, sessionToken, testCall, found, from, count) {
+  if (!diagnosticsAllowed_()) {
+    diag_('Trying other ways to name the recipient is off (ALLOW_DIAGNOSTICS is not "true").');
+    return null;
+  }
   const formId = Number(config.FASTFIELD_FORM_ID);
   const first = fastFieldRecipient_(config);
   const email = config.FASTFIELD_USER_ID;
@@ -2318,6 +2369,7 @@ function setup() {
   ['API_SECRET', 'WEBSITE_SECRET'].forEach(function (name) {
     console.log(name + (props.getProperty(name) ? ' is set.' : ' is NOT set — add it under Project Settings > Script Properties.'));
   });
+  console.log('ALLOW_DIAGNOSTICS is ' + (diagnosticsAllowed_() ? 'ON: the diagnostic route and probes can run. Turn it off for production.' : 'off (the default): the diagnostic route and probes are disabled.'));
   FASTFIELD_REQUIRED.concat(['FASTFIELD_PASSWORD']).forEach(function (name) {
     console.log(name + (props.getProperty(name) ? ' is set.' : ' is not set (optional): won calls will not be dispatched to FastField.'));
   });

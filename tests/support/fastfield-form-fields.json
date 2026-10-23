@@ -1,0 +1,248 @@
+{
+  "source": "Recovery Towing-18.xlsx (FastField form export), sheets Fields and Lists",
+  "fields": {
+    "alpha_1": {
+      "name": "Job Number",
+      "type": "Text",
+      "section": "Job Information"
+    },
+    "audiopicker_1": {
+      "name": "Audio Field",
+      "type": "Audio",
+      "section": "Job Information"
+    },
+    "multiline_1": {
+      "name": "Internal Notes",
+      "type": "Long Text",
+      "section": "Job Information"
+    },
+    "inline_photo_5": {
+      "name": "Embedded Photo Field",
+      "type": "Inline Photo",
+      "section": "Job Information",
+      "hidden": true
+    },
+    "alpha_2": {
+      "name": "Name",
+      "type": "Text",
+      "section": "Customer Information"
+    },
+    "formattedinput_1": {
+      "name": "Phone",
+      "type": "Formatted Input",
+      "section": "Customer Information",
+      "mask": "(###) ###-####"
+    },
+    "numeric_1": {
+      "name": "Year",
+      "type": "Formatted Input",
+      "section": "Vehicle Information",
+      "mask": "####"
+    },
+    "alpha_3": {
+      "name": "Make",
+      "type": "Text",
+      "section": "Vehicle Information"
+    },
+    "alpha_4": {
+      "name": "Model",
+      "type": "Text",
+      "section": "Vehicle Information"
+    },
+    "alpha_5": {
+      "name": "Color",
+      "type": "Text",
+      "section": "Vehicle Information"
+    },
+    "alpha_6": {
+      "name": "License #",
+      "type": "Text",
+      "section": "Vehicle Information"
+    },
+    "alpha_7": {
+      "name": "Lic. State",
+      "type": "Text",
+      "section": "Vehicle Information"
+    },
+    "alpha_8": {
+      "name": "VIN #",
+      "type": "Text",
+      "section": "Vehicle Information"
+    },
+    "alpha_9": {
+      "name": "Address",
+      "type": "Text",
+      "section": "Pick-Up Information"
+    },
+    "alpha_10": {
+      "name": "City",
+      "type": "Text",
+      "section": "Pick-Up Information"
+    },
+    "alpha_11": {
+      "name": "State",
+      "type": "Text",
+      "section": "Pick-Up Information"
+    },
+    "numeric_2": {
+      "name": "ZIP",
+      "type": "Formatted Input",
+      "section": "Pick-Up Information",
+      "mask": "#####"
+    },
+    "alpha_12": {
+      "name": "Freeway",
+      "type": "Text",
+      "section": "Pick-Up Information"
+    },
+    "location_1": {
+      "name": "Location / GPS Field",
+      "type": "Location",
+      "section": "Pick-Up Information"
+    },
+    "alpha_16": {
+      "name": "Pickup Coordinates",
+      "type": "Text",
+      "section": "Pick-Up Information",
+      "required": true,
+      "hidden": true,
+      "rule": "if ($location_1) {\n  var lat = $location_1.latitude || $location_1.lat;\n  var lng = $location_1.longitude || $location_1.lng || $location_1.lon;\n  if (lat && lng) {\n    $alpha_16 = lat + \", \" + lng;\n  }\n}"
+    },
+    "computedlabel_2": {
+      "name": "pickup_coords",
+      "type": "Computed",
+      "section": "Pick-Up Information",
+      "hidden": true,
+      "formula": "var loc = $location_1$;\nif (loc && loc.latitude != null && loc.longitude != null) {\n  return Number(loc.latitude).toFixed(6) + \", \" + Number(loc.longitude).toFixed(6);\n}\nreturn \"\";"
+    },
+    "alpha_13": {
+      "name": "Address",
+      "type": "Text",
+      "section": "Delivery Information"
+    },
+    "alpha_14": {
+      "name": "City",
+      "type": "Text",
+      "section": "Delivery Information"
+    },
+    "alpha_15": {
+      "name": "State",
+      "type": "Text",
+      "section": "Delivery Information"
+    },
+    "numeric_3": {
+      "name": "ZIP",
+      "type": "Formatted Input",
+      "section": "Delivery Information",
+      "mask": "#####"
+    },
+    "location_2": {
+      "name": "Location / GPS Field",
+      "type": "Location",
+      "section": "Delivery Information"
+    },
+    "alpha_17": {
+      "name": "Dropoff Coordinates",
+      "type": "Text",
+      "section": "Delivery Information",
+      "hidden": true,
+      "rule": "if ($location_2) {\n  var lat = $location_2.latitude || $location_2.lat;\n  var lng = $location_2.longitude || $location_2.lng || $location_2.lon;\n  if (lat && lng) {\n    $alpha_17 = lat + \", \" + lng;\n  }\n}"
+    },
+    "multiphoto_picker_1": {
+      "name": "Vehicle Condition",
+      "type": "Multiple Photo",
+      "section": "Vehicle Condition"
+    },
+    "inline_photo_1": {
+      "name": "Left",
+      "type": "Inline Photo",
+      "section": "Vehicle Condition"
+    },
+    "inline_photo_2": {
+      "name": "Right",
+      "type": "Inline Photo",
+      "section": "Vehicle Condition"
+    },
+    "inline_photo_3": {
+      "name": "Front",
+      "type": "Inline Photo",
+      "section": "Vehicle Condition"
+    },
+    "inline_photo_4": {
+      "name": "Rear",
+      "type": "Inline Photo",
+      "section": "Vehicle Condition"
+    },
+    "listpicker_1": {
+      "name": "Problem Reported",
+      "type": "List",
+      "section": "Towing Service"
+    },
+    "listpicker_2": {
+      "name": "Service Performed",
+      "type": "List",
+      "section": "Towing Service"
+    },
+    "numeric_4": {
+      "name": "Card Amount",
+      "type": "Numeric",
+      "section": "Payment"
+    },
+    "numeric_5": {
+      "name": "Cash Amount",
+      "type": "Numeric",
+      "section": "Payment"
+    },
+    "numeric_6": {
+      "name": "Check Amount",
+      "type": "Numeric",
+      "section": "Payment"
+    },
+    "numeric_7": {
+      "name": "Zelle Amount",
+      "type": "Numeric",
+      "section": "Payment"
+    },
+    "numeric_8": {
+      "name": "Cancel Fee",
+      "type": "Numeric",
+      "section": "Payment"
+    },
+    "computedlabel_1": {
+      "name": "Total",
+      "type": "Computed",
+      "section": "Payment",
+      "formula": "$numeric_4$+$numeric_5$+$numeric_6$+$numeric_7$+$numeric_8$"
+    },
+    "signature_1": {
+      "name": "Signature",
+      "type": "Signature",
+      "section": "Authorization",
+      "required": true
+    },
+    "datepicker_1": {
+      "name": "Date",
+      "type": "Date",
+      "section": "Authorization",
+      "required": true
+    }
+  },
+  "lists": {
+    "listpicker_1": [
+      "Accident",
+      "Break Down",
+      "Flat Tire",
+      "Recovery",
+      "No Key"
+    ],
+    "listpicker_2": [
+      "Standard Tow",
+      "Winch Out + Tow",
+      "Winch Out Only",
+      "Jump Start",
+      "Tire Change",
+      "Tire Patch",
+      "Lockout"
+    ]
+  }
+}
