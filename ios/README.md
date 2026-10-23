@@ -34,6 +34,7 @@ Endpoints for checking results and simulating failures:
 |---|---|
 | `curl localhost:8787/rows` | Shows the rows the sheet would contain |
 | `curl -X POST localhost:8787/__mode/busy` | The server answers `BUSY` |
+| `curl -X POST localhost:8787/__mode/fault` | The server answers `INTERNAL` (a call that keeps failing is parked after 6 tries) |
 | `curl -X POST localhost:8787/__mode/down` | The server drops connections |
 | `curl -X POST localhost:8787/__mode/ok` | Back to normal |
 
@@ -44,7 +45,8 @@ OptiTow/
   App/OptiTowApp.swift          entry point, ModelContainer, foreground → drain
   Models/CallRecord.swift       SwiftData model + SyncPayload (exact SCHEMA.md keys)
   Models/CallDraft.swift        form state for the call on the line
-  Sync/SyncManager.swift        NWPathMonitor + queue drain + retry backoff
+  Sync/SyncManager.swift        NWPathMonitor + queue drain + retry backoff + parking
+  Models/LocalStore.swift       opens the SwiftData store; sets a store that won't open aside and starts a clean one
   Sync/WebhookClient.swift      POST + response classification
   Sync/CustomerLocationService.swift  asks a customer to share their location and polls for it
   Config/AppConfig.swift        reads Secrets.plist
@@ -71,7 +73,8 @@ How each failure is handled:
 
 | Server code | What the app does |
 |---|---|
-| `BUSY`, `INTERNAL`, network failure | Retries with backoff: 15 s, doubling, up to 5 min |
+| `BUSY`, network failure | Retries with backoff: 15 s, doubling, up to 5 min, with no limit |
+| `INTERNAL`, or a code the app does not know | The same backoff, but only up to 6 failures in a row: then the call is **parked** (kept on the phone, out of the queue), the calls behind it carry on, and the sync sheet shows "Parked: needs attention" with a **Retry Parked Calls** button |
 | `UNAUTHORIZED`, `SERVER_MISCONFIGURED`, non-JSON reply | Stops draining and shows the error; resumes on the next trigger |
 | `BAD_REQUEST` | Marks the record `isRejected` and keeps the rest of the queue moving |
 
@@ -83,7 +86,7 @@ How each failure is handled:
 - **Vehicle chips:** the make and model chips depend on each other. Choosing Tesla shows only Model 3, Y, S, X and Cybertruck. An **Other** chip reveals a free-text field.
 - **Outcome toggle:** a large Won/Lost toggle sits at the bottom of the form. Decline reasons appear only when the call is Lost. A call can't be saved until Won or Lost is picked.
 - **Light and dark:** the app follows the system appearance. Colors are semantic tokens in `Theme.swift`, so both modes come from one set of definitions.
-- **No history:** there are no search bars or history lists. The toolbar badge shows the sync state (all synced, syncing, offline with calls queued, retrying, failed, or setup needed). Tapping it opens a sheet that explains the state and offers **Retry Sync**.
+- **No history:** there are no search bars or history lists. The toolbar badge shows the sync state (all synced, syncing, offline with calls queued, retrying, failed, or setup needed). Tapping it opens a sheet that explains the state and offers **Retry Sync**, and **Retry Parked Calls** when a call has been parked.
 - **Address search and trip mileage:** Pickup and Dropoff are static rows that open an Address Search sheet with California address suggestions; tapping one confirms the address and its coordinate, and "Use as typed" keeps free text. With both confirmed, a Trip Mileage card shows the three driving legs (yard to pickup, loaded, back to the yard) and a total from Apple Maps, and a Route Map card under it draws those legs (dashed orange to pickup, solid green loaded, dashed blue return). This is display only: nothing about it is saved or synced, and without a connection the fields stay plain text. Set a different yard with optional `YARD_ADDRESS`, `YARD_LAT` and `YARD_LON` keys in `Secrets.plist`.
 - **Start Location:** a static row like Pickup and Dropoff. A confirmed address replaces the configured yard as the route's origin and return point; empty or manual falls back to the yard.
 - **Ask for Location:** with a valid phone, a button texts the customer a link (system Messages sheet; a copy/share fallback where texting is unavailable). The app then polls the Apps Script (`?source=location`) every 3 seconds for up to 5 minutes and fills the Pickup row with the customer's shared position. Needs the updated `Code.gs` deployed (see `apps-script/README.md`).

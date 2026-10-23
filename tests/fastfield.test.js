@@ -29,6 +29,9 @@ function configure(env) {
     FASTFIELD_FORM_ID: '98765',
     FASTFIELD_USER_ID: USER,
     FASTFIELD_PASSWORD: PASSWORD,
+    // Production runs with this off. The diagnostics are what many of these tests exercise, so they
+    // are on here; the "diagnostics off" tests delete it.
+    ALLOW_DIAGNOSTICS: 'true',
   });
   return env;
 }
@@ -102,7 +105,7 @@ test('dispatch: a won call posts the right request and returns the task id', () 
   assert.ok(Array.isArray(payload.mergeFields), 'mergeFields is a list of { fieldKey, value }');
   assert.deepEqual(payload.mergeFields[0], { fieldKey: 'alpha_1', value: 'JOB-0001' });
   assert.deepEqual(merged(payload), {
-    alpha_1: 'JOB-0001', multiline_1: 'No keys', formattedinput_1: '916-555-0199', numeric_1: 2021,
+    alpha_1: 'JOB-0001', multiline_1: 'No keys', formattedinput_1: '916-555-0199', numeric_1: '2021',
     alpha_3: 'Tesla', alpha_4: 'Model 3',
     alpha_9: 'A', alpha_10: '', alpha_11: '',
     alpha_13: 'B', alpha_14: '', alpha_15: '',
@@ -114,7 +117,7 @@ test('dispatch: the outcome text, a missing year and a missing note all behave',
   const env = configure(makeContext());
   env.ctx.dispatchToFastField_({ call_id: 'J', outcome: WON, quoted_price: 100 });
   const fields = merged(JSON.parse(dispatches(env)[0].options.payload));
-  assert.equal(fields.numeric_1, null);
+  assert.equal(fields.numeric_1, '', 'no year is empty text, not null');
   assert.equal(fields.multiline_1, '', 'the quote is no longer part of the notes');
   assert.equal(fields.numeric_4, 100);
   assert.equal(fields.alpha_3, '');
@@ -626,14 +629,14 @@ test('testFastFieldDispatch: signs in, checks the forms with the session, then s
   assert.equal(sent.mergeFields.alpha_1, 'TEST-DISPATCH-001');
   assert.equal(sent.mergeFields.alpha_3, 'Honda');
   assert.equal(sent.mergeFields.alpha_4, 'Civic');
-  assert.equal(sent.mergeFields.numeric_1, 2022);
+  assert.equal(sent.mergeFields.numeric_1, '2022');
   assert.equal(sent.mergeFields.alpha_9, '965 Riverside Ave');
   assert.equal(sent.mergeFields.alpha_10, 'Roseville');
   assert.equal(sent.mergeFields.alpha_11, 'CA');
-  assert.equal(sent.mergeFields.numeric_2, 95678);
+  assert.equal(sent.mergeFields.numeric_2, '95678');
   assert.equal(sent.mergeFields.alpha_13, '123 Main St');
   assert.equal(sent.mergeFields.alpha_14, 'Sacramento');
-  assert.equal(sent.mergeFields.numeric_3, 95814);
+  assert.equal(sent.mergeFields.numeric_3, '95814');
   assert.equal(sent.mergeFields.listpicker_1, 'Flat Tire');
   assert.equal(sent.mergeFields.numeric_4, 150);
   assert.equal(sent.mergeFields.multiline_1, 'TEST DISPATCH, safe to delete');
@@ -1225,7 +1228,9 @@ test('diagnostic route: failures are reported, not thrown, and show the status a
   assert.deepEqual(failed.requests.map((r) => r.status), [401]);
   assert.match(failed.log.join('\n'), /Sign-in failed: HTTP 401/);
 
-  const bare = get(makeContext(), DIAG);
+  const bareEnv = makeContext();
+  bareEnv.props.ALLOW_DIAGNOSTICS = 'true';
+  const bare = get(bareEnv, DIAG);
   assert.equal(bare.ok, true);
   assert.deepEqual(bare.requests, []);
   assert.match(bare.log.join('\n'), /Nothing was sent/);
@@ -1627,17 +1632,17 @@ const sentFields = (call) => {
 
 test('dispatch fields: pickup and dropoff are split into street, city, state and a numeric ZIP', () => {
   const f = sentFields({ pickup_address: '965 Riverside Ave, Roseville, CA 95678', dropoff_address: '123 Main St, Sacramento, CA 95814' });
-  assert.deepEqual([f.alpha_9, f.alpha_10, f.alpha_11, f.numeric_2], ['965 Riverside Ave', 'Roseville', 'CA', 95678]);
-  assert.deepEqual([f.alpha_13, f.alpha_14, f.alpha_15, f.numeric_3], ['123 Main St', 'Sacramento', 'CA', 95814]);
-  assert.equal(typeof f.numeric_2, 'number');
-  assert.equal(typeof f.numeric_3, 'number');
+  assert.deepEqual([f.alpha_9, f.alpha_10, f.alpha_11, f.numeric_2], ['965 Riverside Ave', 'Roseville', 'CA', '95678']);
+  assert.deepEqual([f.alpha_13, f.alpha_14, f.alpha_15, f.numeric_3], ['123 Main St', 'Sacramento', 'CA', '95814']);
+  assert.equal(typeof f.numeric_2, 'string', 'Formatted Input fields take text');
+  assert.equal(typeof f.numeric_3, 'string');
 });
 
 test('dispatch fields: a roadside address leaves city, state and ZIP empty, and the ZIP key is left out', () => {
   const f = sentFields({ pickup_address: 'I-80 EB past Exit 98', dropoff_address: '123 Main St, Sacramento, CA 95814' });
   assert.deepEqual([f.alpha_9, f.alpha_10, f.alpha_11], ['I-80 EB past Exit 98', '', '']);
   assert.ok(!('numeric_2' in f), 'no ZIP, no numeric_2');
-  assert.equal(f.numeric_3, 95814);
+  assert.equal(f.numeric_3, '95814');
   const none = sentFields({});
   assert.ok(!('numeric_2' in none) && !('numeric_3' in none));
   assert.equal(none.alpha_9, '');
@@ -1685,9 +1690,9 @@ const withProps = (props, call) => {
   return merged(JSON.parse(dispatches(env)[0].options.payload));
 };
 
-test('field keys: year and ZIPs default to numeric_1, numeric_2 and numeric_3 and are numbers', () => {
+test('field keys: year and ZIPs default to numeric_1, numeric_2 and numeric_3 and go as text', () => {
   const f = withProps({});
-  assert.deepEqual([f.numeric_1, f.numeric_2, f.numeric_3], [2022, 95678, 95814]);
+  assert.deepEqual([f.numeric_1, f.numeric_2, f.numeric_3], ['2022', '95678', '95814']);
 });
 
 test('field keys: FASTFIELD_YEAR_FIELD and the ZIP properties move them to text fields, sent as text', () => {
@@ -1698,17 +1703,17 @@ test('field keys: FASTFIELD_YEAR_FIELD and the ZIP properties move them to text 
   assert.ok(!('numeric_1' in f) && !('numeric_2' in f) && !('numeric_3' in f), 'the numeric keys are no longer sent');
 });
 
-test('field keys: a numeric replacement key is still sent as a number, and each can be switched alone', () => {
+test('field keys: a replacement key also takes text, and each can be switched alone', () => {
   const f = withProps({ FASTFIELD_PICKUP_ZIP_FIELD: 'numeric_9' });
-  assert.equal(f.numeric_9, 95678);
+  assert.equal(f.numeric_9, '95678');
   assert.ok(!('numeric_2' in f));
-  assert.equal(f.numeric_3, 95814);
-  assert.equal(f.numeric_1, 2022);
+  assert.equal(f.numeric_3, '95814');
+  assert.equal(f.numeric_1, '2022');
 });
 
-test('field keys: a missing year or ZIP is null / absent for numeric keys and empty text / absent for text keys', () => {
+test('field keys: a missing year is empty text and a missing ZIP is left out, whatever the key', () => {
   const none = withProps({}, { vehicle_year: undefined, pickup_address: 'I-80 EB past Exit 98' });
-  assert.equal(none.numeric_1, null);
+  assert.equal(none.numeric_1, '');
   assert.ok(!('numeric_2' in none));
   const text = withProps({ FASTFIELD_YEAR_FIELD: 'alpha_20', FASTFIELD_PICKUP_ZIP_FIELD: 'alpha_22' }, { vehicle_year: undefined, pickup_address: 'I-80 EB past Exit 98' });
   assert.equal(text.alpha_20, '');
@@ -1717,6 +1722,68 @@ test('field keys: a missing year or ZIP is null / absent for numeric keys and em
 
 test('field keys: a malformed property value is ignored in favour of the default', () => {
   const f = withProps({ FASTFIELD_YEAR_FIELD: 'not a key!', FASTFIELD_PICKUP_ZIP_FIELD: '' });
-  assert.equal(f.numeric_1, 2022);
-  assert.equal(f.numeric_2, 95678);
+  assert.equal(f.numeric_1, '2022');
+  assert.equal(f.numeric_2, '95678');
+});
+
+// ---- diagnostics are off unless ALLOW_DIAGNOSTICS is "true" ----
+
+const diagnosticsOff = () => {
+  const env = configure(makeContext());
+  delete env.props.ALLOW_DIAGNOSTICS;
+  return env;
+};
+
+test('diagnostics off: the route answers like a wrong token, even with the right one, and calls nobody', () => {
+  const env = diagnosticsOff();
+  fastFieldServer(env);
+  for (const query of [DIAG, Object.assign({}, DIAG, { step: '3' }), Object.assign({}, DIAG, { from: '0', count: '4' })]) {
+    assert.deepEqual(get(env, query), { ok: false, code: 'UNAUTHORIZED', error: 'UNAUTHORIZED' });
+  }
+  assert.equal(env.fetchCalls.length, 0, 'no sign-in, no users, no dispatch');
+  assert.deepEqual(get(env, Object.assign({}, DIAG, { token: 'wrong' })), { ok: false, code: 'UNAUTHORIZED', error: 'UNAUTHORIZED' });
+  for (const value of ['', 'false', '1', 'yes', 'TRUEISH']) {
+    env.props.ALLOW_DIAGNOSTICS = value;
+    assert.equal(get(env, DIAG).ok, false, JSON.stringify(value));
+  }
+  assert.equal(env.fetchCalls.length, 0);
+});
+
+test('diagnostics on: only the exact value "true" (any case, quotes and spaces from a paste are fine) turns the route on', () => {
+  for (const value of ['true', 'TRUE', ' "true" ']) {
+    const env = configure(makeContext());
+    env.props.ALLOW_DIAGNOSTICS = value;
+    fastFieldServer(env);
+    assert.equal(get(env, DIAG).ok, true, JSON.stringify(value));
+  }
+});
+
+test('diagnostics off: the editor run still sends its test task but skips the user list, groups and the format sweep', () => {
+  const env = diagnosticsOff();
+  fastFieldServer(env, { dispatch: NO_RECIPIENT });
+  env.ctx.testFastFieldDispatch();
+  assert.equal(calls(env, USERS_URL).length, 0, 'no user list');
+  assert.equal(calls(env, GROUPS_URL).length, 0, 'no group list');
+  assert.equal(dispatches(env).length, 1, 'the one configured send, and no sweep after "recipient not found"');
+  assert.match(logText(env), /Step 3 of 4: skipped[\s\S]*ALLOW_DIAGNOSTICS/);
+  assert.match(logText(env), /Trying other ways to name the recipient is off/);
+  noSecrets(env);
+});
+
+test('diagnostics off: the format sweep, the user probe and the sign-in probe do nothing when called directly', () => {
+  const env = diagnosticsOff();
+  fastFieldServer(env);
+  const config = env.ctx.fastFieldConfig_();
+  const testCall = { call_id: 'T', outcome: WON };
+  assert.equal(env.ctx.tryFastFieldRecipientFormats_(config, TOKEN, testCall, { id: '1' }), null);
+  assert.equal(env.ctx.discoverFastFieldUser_(config, TOKEN), null);
+  env.ctx.probeFastFieldSignIn_(SUB, USER, PASSWORD);
+  assert.equal(env.fetchCalls.length, 0);
+  assert.match(logText(env), /Sign-in probing is off/);
+});
+
+test('diagnostics off: a won call from the app still dispatches normally', () => {
+  const env = diagnosticsOff();
+  assert.equal(env.ctx.dispatchToFastField_({ call_id: 'J', outcome: 1 }), 'FF-1001');
+  assert.equal(dispatches(env).length, 1);
 });

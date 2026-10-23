@@ -8,7 +8,7 @@
 //   GET  /exec           health check, or ?loc=<token> the customer location page (HTML)
 //   GET  /rows           current Call Log rows as JSON
 //   GET  /__locations    customer-location link tokens currently in the cache, with their entries
-//   POST /__mode/<mode>  ok (default) | busy (answer BUSY) | down (drop connections)
+//   POST /__mode/<mode>  ok (default) | busy (answer BUSY) | fault (answer INTERNAL) | down (drop connections)
 'use strict';
 
 const http = require('node:http');
@@ -53,6 +53,10 @@ http.createServer((req, res) => {
     }
     if (req.method === 'POST' && url.pathname === '/exec') {
       if (mode === 'down') return req.socket.destroy();
+      if (mode === 'fault') {
+        console.log('POST /exec -> INTERNAL (simulated)');
+        return send(res, 200, { ok: false, code: 'INTERNAL', error: 'Simulated server error.' });
+      }
       if (mode === 'busy') {
         console.log('POST /exec -> BUSY (simulated)');
         return send(res, 200, { ok: false, code: 'BUSY', error: 'Simulated busy sheet.' });

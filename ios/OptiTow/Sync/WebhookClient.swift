@@ -12,8 +12,12 @@ struct WebhookResponse: Decodable, Sendable {
 
 enum SyncResult: Sendable, Equatable {
     case synced
-    /// Transient (lock busy, server hiccup, no connectivity): retry the same record later.
+    /// Transient (lock busy, no connectivity): retry the same record later, any number of times.
     case retryLater(String)
+    /// The server answered with an error that is not about this payload (INTERNAL, or a code this app
+    /// does not know). Retry the record, but only a few times: one that keeps doing this is parked so it
+    /// cannot hold up the calls behind it.
+    case serverFault(String)
     /// Deployment/credential problem: affects every record, so stop draining.
     case halt(String)
     /// This payload will never be accepted: park the record.
@@ -28,7 +32,8 @@ enum SyncResult: Sendable, Equatable {
         switch response.code {
         case "BAD_REQUEST": self = .reject(message)
         case "UNAUTHORIZED", "SERVER_MISCONFIGURED": self = .halt(message)
-        default: self = .retryLater(message) // BUSY, INTERNAL, anything new
+        case "BUSY": self = .retryLater(message)
+        default: self = .serverFault(message) // INTERNAL, and any code added later
         }
     }
 }

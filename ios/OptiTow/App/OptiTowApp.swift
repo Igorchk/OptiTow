@@ -4,23 +4,22 @@ import SwiftUI
 @main
 struct OptiTowApp: App {
     private let container: ModelContainer
+    /// Set when the local store had to be reset or could not be kept on disk; shown once as a banner.
+    private let storeRecovery: StoreRecovery?
     @State private var sync: SyncManager
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
-        let container: ModelContainer
-        do {
-            container = try ModelContainer(for: CallRecord.self)
-        } catch {
-            fatalError("Unable to open the local call store: \(error)")
-        }
-        self.container = container
-        _sync = State(initialValue: SyncManager(context: container.mainContext, config: AppConfig.load()))
+        // Never fatal: a store that won't open is set aside and replaced (see LocalStore).
+        let opened = LocalStore.open()
+        self.container = opened.container
+        self.storeRecovery = opened.recovery
+        _sync = State(initialValue: SyncManager(context: opened.container.mainContext, config: AppConfig.load()))
     }
 
     var body: some Scene {
         WindowGroup {
-            DispatchFormView()
+            DispatchFormView(storeRecovery: storeRecovery)
                 .environment(sync)
                 .tint(Theme.link)
                 .task { sync.start() }
