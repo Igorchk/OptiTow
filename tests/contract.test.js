@@ -53,9 +53,10 @@ test('iOS chip strings == Apps Script ENUMS', () => {
     callerType: 'Caller_Type',
     payerName: 'Payer_Name',
     serviceRequested: 'Service_Requested',
-    drivetrain: 'Drivetrain',
     vehicleCondition: 'Vehicle_Condition',
-    sceneLocation: 'Scene_Location',
+    // Drivetrain and Scene_Location are not here on purpose: the app no longer offers them (it sends
+    // both keys blank, which the SyncPayload test above still requires), so it has no chips for
+    // them. Their picklists stay in ENUMS for rows that already have a value.
   };
   for (const [swift, header] of Object.entries(pairs)) {
     assert.deepEqual(swiftArray(src, swift), [...ENUMS[header]], header);

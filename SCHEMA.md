@@ -39,6 +39,7 @@ Columns 1–21 are the dispatcher block. Everything after is automated ingestion
 | # | Columns | Written by |
 |---|---|---|
 | 1–21 | `Call_ID`, `Date_Time`, `Customer_Phone`, `Caller_Type`, `Payer_Name`, `Service_Requested`, `Vehicle_Year`, `Vehicle_Make`, `Vehicle_Model`, `Drivetrain`, `Vehicle_Condition`, `Scene_Location`, `Start_Location`, `Pickup_Address`, `Dropoff_Address`, `Loaded_Miles`, `Deadhead_Est_Miles`, `Quoted_Price`, `Outcome`, `Decline_Reason`, `Notes_Comments` | iOS app (and website form). The Apps Script computes `Loaded_Miles` and `Deadhead_Est_Miles` itself. |
+| 10, 12 | `Drivetrain`, `Scene_Location` | Still dispatcher-block columns, but the app no longer asks for them: it sends `drivetrain` and `scene_location` as `""`, which the server ignores, so they stay blank for new calls and keep any value an older call or a manual edit gave them. |
 | 22 | `Lead_Source` | CallRail attribution; the Phase 3 AI fills it only if still blank. Website leads are tagged `Website Form`. |
 | 23–26 | `Search_Keyword`, `Campaign_Name`, `Call_Duration_Sec`, `Call_Recording_URL` | CallRail webhook |
 | 27–31 | `Caller_Tone`, `Mentioned_Damage`, `AI_Processed_At`, `Call_Intent`, `Admin_Summary` | Phase 3 Mac Mini AI worker (`worker/`). Fill-only-if-blank: it never overwrites an existing value. |

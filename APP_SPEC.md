@@ -27,15 +27,14 @@ Use these EXACT string values for the selection chips:
 - `caller_type`: [Private Cash, Insurance / Motor Club, Commercial Fleet, Body Shop]
 - `payer_name`: [Cash / Customer, Triple A (AAA), Agero, Geico, Allstate, State Farm, Swoop, Urgently, Other]
 - `service_requested`: [Standard Tow, Flatbed / Specialty, Jump Start, Tire Change, Tire Patch, Lockout, Winch Out Only, Winch Out + Tow]
-- `drivetrain`: [FWD, RWD, AWD / 4WD, Electric Vehicle (EV), Hybrid, Unknown]
 - `vehicle_condition`: [Rolling / Neutral, Locked in Park, No Keys, Flat Tire, Ditch / Mud / Winch, Collision, Wheel Damaged, Mechanical / Electrical Issue]
-- `scene_location`: [Residential Driveway, Public Surface Street, Highway / Freeway Shoulder, Underground Parking Structure, Commercial Lot]
 
 **Not captured in the app (removed on purpose):**
 - `lead_source`: attribution is automated. CallRail fills it, and the Phase 3 AI worker fills it only if it is still blank.
-- `urgency_level`: retired from the schema entirely. `Caller_Tone` (from the audio) and `scene_location` already carry that signal.
+- `urgency_level`: retired from the schema entirely. `Caller_Tone` (from the audio) already carries that signal.
+- `drivetrain` and `scene_location`: no longer asked for in the app. The sheet keeps both columns (`Drivetrain`, `Scene_Location`) and the app still sends both keys, always as `""`, so the payload contract is unchanged. The server drops blank values, so nothing is written and nothing existing is overwritten.
 
-The app must not show, store or POST either field.
+The app must not show, store or POST `lead_source` or `urgency_level`.
 
 ## 5b. Required Fields
 - `customer_phone` is **mandatory**: at least 10 digits, ignoring formatting (dashes, spaces, parentheses, a leading `+1`). The phone number is how CallRail data is merged into the call, so a call without one can't be saved. The "Save Call" button sits directly under the Outcome card (below WON / LOST) and does not exist until the phone has 10 digits and an outcome is chosen: there is no disabled button and no bar pinned to the bottom of the screen.

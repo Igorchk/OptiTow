@@ -16,9 +16,12 @@ final class CallRecord {
     var vehicle_year: String
     var vehicle_make: String
     var vehicle_model: String
-    var drivetrain: String
+    // No longer asked for in the app (the form has no Drivetrain or Scene), but still the sheet's
+    // columns 10 and 12. They stay stored, defaulting to "", so a store from an older build opens
+    // without a migration and a call saved before the change still syncs the values it was given.
+    var drivetrain: String = ""
     var vehicle_condition: String
-    var scene_location: String
+    var scene_location: String = ""
     var start_location: String
     var pickup_address: String
     var dropoff_address: String
@@ -54,9 +57,7 @@ final class CallRecord {
         vehicle_year = draft.vehicle_year
         vehicle_make = draft.vehicle_make
         vehicle_model = draft.vehicle_model
-        drivetrain = draft.drivetrain
         vehicle_condition = draft.vehicle_condition
-        scene_location = draft.scene_location
         start_location = draft.start_location
         pickup_address = draft.pickup_address
         dropoff_address = draft.dropoff_address
