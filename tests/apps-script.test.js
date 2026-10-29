@@ -981,3 +981,39 @@ test('migration: any other missing header is still a configuration error', () =>
   env.sheet.data[0] = env.sheet.data[0].map((h) => (h === 'Outcome' ? 'Outcome_Renamed' : h));
   assert.equal(post(env, appPayload()).code, 'SERVER_MISCONFIGURED');
 });
+
+// ---- Drivetrain and Scene_Location: the app no longer asks, and sends both keys blank ----
+
+test('app: blank drivetrain and scene_location are accepted quietly and leave the cells blank', () => {
+  const env = makeContext();
+  const res = post(env, appPayload({ drivetrain: '', scene_location: '' }));
+  assert.equal(res.ok, true);
+  assert.deepEqual(res.warnings, [], 'no validation warning for a blank picklist value');
+  const row = rowObj(env, res.row);
+  assert.equal(row.Drivetrain, '');
+  assert.equal(row.Scene_Location, '');
+});
+
+test('app: a payload with the two keys missing altogether is accepted too', () => {
+  const env = makeContext();
+  const body = appPayload();
+  delete body.drivetrain;
+  delete body.scene_location;
+  const res = post(env, body);
+  assert.equal(res.ok, true);
+  assert.deepEqual(res.warnings, []);
+  assert.equal(rowObj(env, res.row).Drivetrain, '');
+  assert.equal(rowObj(env, res.row).Scene_Location, '');
+});
+
+test('app: a later sync with the two keys blank never wipes a value the row already has', () => {
+  const env = makeContext();
+  const first = post(env, appPayload({ drivetrain: 'Hybrid', scene_location: 'Commercial Lot' }));
+  assert.equal(first.ok, true);
+  const again = post(env, appPayload({ drivetrain: '', scene_location: '', notes_comments: 'second sync' }));
+  assert.equal(again.row, first.row, 'the same call is updated, not duplicated');
+  const row = rowObj(env, first.row);
+  assert.equal(row.Drivetrain, 'Hybrid');
+  assert.equal(row.Scene_Location, 'Commercial Lot');
+  assert.equal(row.Notes_Comments, 'second sync');
+});

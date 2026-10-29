@@ -214,8 +214,6 @@ struct DispatchFormView: View {
                                             value: $draft.vehicle_make, placeholder: "Select make",
                                             otherPlaceholder: "Make")
             modelPicker
-            AdaptiveDropdownPicker(title: "Drivetrain", options: ChipOptions.drivetrain, text: $draft.drivetrain,
-                                   placeholder: "Select drivetrain")
             AdaptiveDropdownPicker(title: "Condition", options: ChipOptions.vehicleCondition,
                                    text: $draft.vehicle_condition, placeholder: "Select condition")
         }
@@ -244,8 +242,6 @@ struct DispatchFormView: View {
 
     private var locationSection: some View {
         FormSection(title: "Location") {
-            AdaptiveDropdownPicker(title: "Scene", options: ChipOptions.sceneLocation,
-                                   text: $draft.scene_location, placeholder: "Select scene")
             FieldGroup(label: "Pickup Address") {
                 AddressField(label: "Pickup address", placeholder: "Tap to enter pickup address",
                              text: $draft.pickup_address, entry: $draft.pickup_entry)
